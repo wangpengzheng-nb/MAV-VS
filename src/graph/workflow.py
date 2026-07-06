@@ -51,23 +51,17 @@ from src.graph.state import (
 def strategy_node(state: MACVSState) -> Dict:
     """Step 1: Strategy Agent — 战前侦察。
 
-    读取靶点信息，查询文献/知识库，生成《动态药化过滤协议》。
+    委托给 src.agents.target_scout.scouting_node 执行完整的
+    TargetInfo 提取 → LLM 结构化推理 → Rulebook 产出流程。
+
+    返回的 partial state update 包含:
+      - filter_protocol: Pydantic-validated DynamicFilterProtocol dict
+      - protocol_version: 自增版本号
+      - pipeline_stage: "strategy" (或 "error")
     """
-    from src.agents.target_scout import StrategyAgent
+    from src.agents.target_scout import scouting_node
 
-    agent = StrategyAgent()
-    result = agent.generate_protocol(
-        target_info=state["target_info"],
-        knowledge_base=state.get("knowledge_base"),
-    )
-
-    return {
-        "pipeline_stage": "strategy",
-        "filter_protocol": result.get("protocol"),
-        "protocol_version": state["protocol_version"] + 1,
-        "event_log": [f"[Strategy] Protocol v{state['protocol_version']+1} generated."],
-        **update_timestamp(state),
-    }
+    return scouting_node(state)
 
 
 def clustering_node(state: MACVSState) -> Dict:

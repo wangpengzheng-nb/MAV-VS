@@ -22,6 +22,7 @@ AutoVS-Agent: 全局图状态定义 (Global Graph State)
 from __future__ import annotations
 
 import uuid
+import operator
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, TypedDict, Union
 
@@ -411,11 +412,11 @@ class MACVSState(TypedDict):
     final_hits: List[MoleculeRecord]                 # 最终命中的 3-5 个分子
     output_report_path: Optional[str]
 
-    # =========================================================================
+# =========================================================================
     # 14. 异常与日志
     # =========================================================================
-    errors: List[Dict[str, str]]                     # [{node, timestamp, message}]
-    event_log: List[str]                             # 关键事件时间线
+    errors: Annotated[List[Dict[str, str]], operator.add]   # 修改：使用 operator.add 保证追加而不覆盖
+    event_log: Annotated[List[str], operator.add]           # 修改：使用 operator.add 保证追加而不覆盖
 
     # =========================================================================
     # 15. LLM 消息历史 (LangGraph 标准字段, add_messages reducer)
