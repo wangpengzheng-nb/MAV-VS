@@ -19,9 +19,11 @@ Step 3 核心闭环:
 from __future__ import annotations
 
 import json
-import os
 import math
+import os
 import random
+import shutil
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -687,7 +689,7 @@ class WatchdogAgent:
         }
 
     # =========================================================================
-    # Step 4: 高通量虚拟筛选 (HTVS) — 占位符
+    # Step 4: 高通量虚拟筛选 (HTVS) — 真实 GNINA 调用
     # =========================================================================
 
     def run_htvs(
@@ -695,22 +697,155 @@ class WatchdogAgent:
         molecules: List[dict],
         watchdog_config: Optional[dict],
         top_n: int = 2000,
+        receptor_pdb: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        block: bool = True,
+        poll_interval: int = 60,
+        timeout_hours: int = 48,
     ) -> Dict[str, Any]:
         """Step 4: 基于锁定参数的高通量虚拟筛选。
 
-        TODO: 对接 Slurm 集群，提交分片 GNINA 作业。
+        使用 GNINA rough docking 对候选池进行批量对接:
+          1. SMILES → 3D SDF 准备
+          2. 分块提交 Slurm GPU 作业
+          3. 等待完成 + 解析输出 SDF
+          4. 按 CNN_VS 排序取 Top-N
+
+        Args:
+            molecules: 候选分子池 (MoleculeRecord 列表)。
+            watchdog_config: Watchdog 锁定的对接参数。
+            top_n: 保留分子数。
+            receptor_pdb: 受体 PDB 路径 (None 则从 target_info 推断)。
+            output_dir: 输出目录 (None 则自动创建)。
+            block: 是否阻塞等待 Slurm 完成。
+            poll_interval: Slurm 轮询间隔 (秒)。
+            timeout_hours: 总超时 (小时)。
+
+        Returns:
+            {survivors, job_ids, docking_stats, output_dir}
         """
-        for m in molecules:
-            m["docking_score"] = -8.0
+        from src.tools.molecular_utils import (
+            GNINADocker, SDFUtils, PrepUtils, SlurmJobManager,
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # ---- 1. 准备输出目录 ----
+        if output_dir is None:
+            output_dir = os.path.join(
+                os.getcwd(), "autovs_output", "htvs",
+                datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"),
+            )
+        os.makedirs(output_dir, exist_ok=True)
+
+        # ---- 2. 准备配体 SDF ----
+        ligand_chunks = PrepUtils.prepare_ligands_for_docking(
+            molecules=molecules,
+            output_dir=os.path.join(output_dir, "ligands"),
+            chunk_size=5000,
+        )
+
+        if not ligand_chunks:
+            return {
+                "survivors": [],
+                "job_ids": [],
+                "docking_stats": {"total": len(molecules), "passed": 0, "error": "Ligand preparation failed"},
+                "output_dir": output_dir,
+            }
+
+        # ---- 3. 解析对接参数 ----
+        cfg = watchdog_config or {}
+        grid_center = cfg.get("grid_center", [0.0, 0.0, 0.0])
+        grid_size = cfg.get("grid_size", [20.0, 20.0, 20.0])
+        exhaustiveness = cfg.get("exhaustiveness", 8)
+
+        # ---- 4. 提交 GNINA 对接 (每个 chunk 一个 Slurm 作业) ----
+        job_ids = []
+        for i, chunk_path in enumerate(ligand_chunks):
+            chunk_dir = os.path.join(output_dir, f"chunk_{i:03d}")
+            result = GNINADocker.run_rough_docking(
+                receptor_pdb=receptor_pdb or "",
+                ligand_sdf=chunk_path,
+                grid_center=grid_center,
+                grid_size=grid_size,
+                output_dir=chunk_dir,
+                exhaustiveness=exhaustiveness,
+                submit_slurm=True,
+            )
+            if result.get("job_ids"):
+                job_ids.extend(result["job_ids"])
+
+        if not job_ids:
+            return {
+                "survivors": [],
+                "job_ids": [],
+                "docking_stats": {"total": len(molecules), "passed": 0, "error": "Slurm submission failed"},
+                "output_dir": output_dir,
+            }
+
+        # ---- 5. 等待完成 ----
+        if block:
+            def progress_cb(jid, status):
+                pass  # 静默等待; 日志由 Slurm 管理
+
+            final_status = SlurmJobManager.wait(
+                job_ids=job_ids,
+                poll_interval=poll_interval,
+                timeout_seconds=timeout_hours * 3600,
+                on_progress=progress_cb,
+            )
+
+            completed = sum(1 for s in final_status.values() if s == "COMPLETED")
+            failed = sum(1 for s in final_status.values() if s != "COMPLETED")
+        else:
+            completed = 0
+            failed = 0
+
+        # ---- 6. 解析对接结果 ----
+        all_scores = []
+        for i in range(len(ligand_chunks)):
+            chunk_dir = os.path.join(output_dir, f"chunk_{i:03d}")
+            sdf_path = os.path.join(chunk_dir, "gnina_rough_poses.sdf")
+            if os.path.exists(sdf_path):
+                try:
+                    scores = SDFUtils.parse_gnina_sdf(sdf_path, pose_select="best_cnn_vs")
+                    all_scores.extend(scores)
+                except Exception:
+                    pass
+
+        # ---- 7. 更新分子记录 + 选 Top-N ----
+        score_map = {s["mol_id"]: s for s in all_scores}
+        for mol in molecules:
+            mid = mol.get("mol_id", "")
+            if mid in score_map:
+                s = score_map[mid]
+                mol["docking_score"] = s.get("cnn_vs") or s.get("affinity")
+                mol["docking_affinity"] = s.get("affinity")
+                mol["docking_pose_path"] = ""  # 需要从 SDF 提取姿态
+
+        # 按 CNN_VS 降序排序
+        molecules.sort(
+            key=lambda m: m.get("docking_score") or -999,
+            reverse=True,
+        )
         survivors = molecules[:top_n]
+
         return {
             "survivors": survivors,
-            "job_ids": [],
-            "docking_stats": {"total": len(molecules), "passed": len(survivors)},
+            "job_ids": job_ids,
+            "docking_stats": {
+                "total": len(molecules),
+                "chunks": len(ligand_chunks),
+                "completed_chunks": completed,
+                "failed_chunks": failed,
+                "parsed_molecules": len(all_scores),
+                "passed": len(survivors),
+            },
+            "output_dir": output_dir,
         }
 
     # =========================================================================
-    # Step 7: MD Oracle — 占位符
+    # Step 7: MD Oracle — 真实 GROMACS 调用
     # =========================================================================
 
     def run_md_simulations(
@@ -719,31 +854,185 @@ class WatchdogAgent:
         target_info: dict,
         watchdog_config: Optional[dict],
         simulation_time_ns: float = 50.0,
+        receptor_pdb: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        block: bool = True,
+        poll_interval: int = 120,
+        timeout_hours: int = 72,
     ) -> Dict[str, Any]:
-        """Step 7: MD 模拟终极验证。
+        """Step 7: 对 Top 分子进行 GROMACS MD 模拟终极验证。
 
-        TODO: 对接 Slurm GPU 集群，提交 GROMACS 作业。
+        为每个分子创建独立 workdir，执行完整的:
+          pdb2gmx → obabel → acpype → system build
+          → EM → NVT → NPT → MD (50ns)
+          → PBC cleanup → RMSD → MMGBSA
+
+        Args:
+            molecules: Top-N 分子列表 (约 20)。
+            target_info: 靶点信息。
+            watchdog_config: Watchdog 锁定的 MD 参数。
+            simulation_time_ns: 每分子 MD 模拟时长 (ns)。
+            receptor_pdb: 受体 PDB 路径。
+            output_dir: 输出目录。
+            block: 是否阻塞等待。
+            poll_interval: 轮询间隔。
+            timeout_hours: 总超时。
+
+        Returns:
+            {results: {mol_id: MDSimulationRecord}, passed, failed, job_ids}
         """
+        from src.tools.molecular_utils import (
+            GromacsMDRunner, PrepUtils, SlurmJobManager,
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # ---- 1. 准备输出目录 ----
+        if output_dir is None:
+            output_dir = os.path.join(
+                os.getcwd(), "autovs_output", "md_oracle",
+                datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"),
+            )
+        os.makedirs(output_dir, exist_ok=True)
+
+        # ---- 2. 准备受体 ----
+        if receptor_pdb is None:
+            receptor_pdb = target_info.get("pdb_path", "")
+        if not receptor_pdb or not os.path.exists(receptor_pdb):
+            return {
+                "results": {},
+                "passed": [],
+                "failed": [],
+                "job_ids": [],
+                "error": f"Receptor PDB not found: {receptor_pdb}",
+            }
+
+        clean_receptor = os.path.join(output_dir, "receptor_clean.pdb")
+        shutil.copy(receptor_pdb, clean_receptor)
+
+        # ---- 3. 准备配体 SDF (单个分子) + 提交 MD ----
+        cfg = watchdog_config or {}
+        force_field = cfg.get("md_force_field", "amber99sb-ildn")
+        water_model = cfg.get("md_water_model", "tip3p")
+        temperature = cfg.get("md_temperature", 310.0)
+
+        job_info: Dict[str, Dict] = {}
+        all_job_ids = []
+
+        for mol in molecules:
+            mid = mol.get("mol_id", f"mol_{uuid.uuid4().hex[:8]}")
+            smi = mol.get("smiles", "")
+
+            if not smi:
+                continue
+
+            # 配体 SDF 准备
+            mol_dir = os.path.join(output_dir, "ligands", mid)
+            os.makedirs(mol_dir, exist_ok=True)
+            ligand_sdf = os.path.join(mol_dir, f"{mid}.sdf")
+
+            try:
+                from rdkit import Chem
+                from rdkit.Chem import AllChem
+
+                m = Chem.MolFromSmiles(smi)
+                if m is None:
+                    continue
+                m = Chem.AddHs(m)
+                AllChem.EmbedMolecule(m, AllChem.ETKDGv3())
+                AllChem.MMFFOptimizeMolecule(m)
+                w = Chem.SDWriter(ligand_sdf)
+                m.SetProp("_Name", mid)
+                m.SetProp("source_id", mid)
+                w.write(m)
+                w.close()
+            except Exception:
+                continue
+
+            # 形式电荷: 从 SMILES 估算 (中性分子默认为 0)
+            formal_charge = mol.get("formal_charge", 0)
+
+            # 提交 GROMACS
+            md_result = GromacsMDRunner.prepare_and_submit(
+                receptor_pdb=clean_receptor,
+                ligand_sdf=ligand_sdf,
+                mol_id=mid,
+                workdir_base=os.path.join(output_dir, "md_workdirs"),
+                formal_charge=formal_charge,
+                simulation_ns=simulation_time_ns,
+                force_field=force_field,
+                water_model=water_model,
+                temperature=temperature,
+                submit_slurm=True,
+            )
+
+            job_info[mid] = {
+                "job_id": md_result.get("job_id"),
+                "workdir": md_result.get("workdir"),
+                "prep_ok": md_result.get("prep_ok", False),
+            }
+            if md_result.get("job_id"):
+                all_job_ids.append(md_result["job_id"])
+
+        # ---- 4. 等待完成 ----
+        if block and all_job_ids:
+            final_status = SlurmJobManager.wait(
+                job_ids=all_job_ids,
+                poll_interval=poll_interval,
+                timeout_seconds=timeout_hours * 3600,
+            )
+
+        # ---- 5. 分析结果 ----
         results = {}
         passed = []
-        for mol in molecules:
-            mid = mol["mol_id"]
-            record = {
-                "mol_id": mid,
-                "trajectory_path": f"/tmp/md_{mid}.xtc",
-                "total_time_ns": simulation_time_ns,
-                "dG_mmgbsa": -9.5,
-                "ligand_rmsd_mean": 1.5,
-                "key_hbond_occupancy": {"ASP103": 0.85},
-                "complex_stable": True,
-                "simulation_status": "completed",
-            }
-            results[mid] = record
-            mol["md_dG"] = -9.5
-            mol["md_passed"] = True
-            passed.append(mol)
+        failed = []
 
-        return {"results": results, "passed": passed, "failed": []}
+        for mol in molecules:
+            mid = mol.get("mol_id", "")
+            info = job_info.get(mid, {})
+            workdir = info.get("workdir", "")
+
+            if workdir and os.path.exists(workdir):
+                record = GromacsMDRunner.analyze_results(workdir, mid)
+            else:
+                record = {
+                    "mol_id": mid,
+                    "simulation_status": "failed",
+                    "error_message": "MD job not submitted or workdir missing",
+                    "complex_stable": False,
+                    "trajectory_path": "",
+                    "topology_path": "",
+                    "total_time_ns": 0,
+                    "dG_mmgbsa": None,
+                    "dG_mmpbsa": None,
+                    "kd_predicted": None,
+                    "ligand_rmsd_mean": 99.0,
+                    "ligand_rmsd_std": 0.0,
+                    "protein_rmsd_mean": 99.0,
+                    "key_hbond_occupancy": {},
+                }
+
+            results[mid] = record
+
+            # 更新分子记录
+            mol["md_dG"] = record.get("dG_mmgbsa")
+            mol["md_kd"] = record.get("kd_predicted")
+            mol["md_hbond_occupancy"] = record.get("key_hbond_occupancy", {})
+            mol["md_rmsd_mean"] = record.get("ligand_rmsd_mean")
+            mol["md_passed"] = record.get("complex_stable", False)
+
+            if record.get("complex_stable") and (record.get("dG_mmgbsa") or 99) < -7.0:
+                passed.append(mol)
+            else:
+                failed.append(mol)
+
+        return {
+            "results": results,
+            "passed": passed,
+            "failed": failed,
+            "job_ids": all_job_ids,
+            "output_dir": output_dir,
+        }
 
 
 # =============================================================================
