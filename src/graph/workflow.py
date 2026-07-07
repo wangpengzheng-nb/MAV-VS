@@ -67,27 +67,20 @@ def strategy_node(state: MACVSState) -> Dict:
 def clustering_node(state: MACVSState) -> Dict:
     """Step 2: 化学空间聚类降维。
 
-    对百亿大库进行 Butina/K-Means 聚类，抽取 ~10 万个化学空间差异最大的
-    代表分子进入候选池。如有闭环知识库指导，则定向偏置采样。
+    委托给 src.agents.orchestrator.clustering_node 执行:
+      - 分块流式读取大库 (Generator Pattern)
+      - Morgan 指纹 (ECFP4, 2048 bits) 实时特征化
+      - 小库: MaxMinPicker 直接多样性精挑
+      - 大库: 哈希分桶粗筛 → MaxMinPicker 精挑 (二级漏斗)
+      - 闭环偏置: 优势骨架优先纳入候选池
+
+    返回的 partial state update 包含:
+      - candidate_pool / surviving_pool: ~10万代表分子
+      - cluster_count: 实际挑选数量
     """
-    from src.agents.orchestrator import OrchestratorAgent
+    from src.agents.orchestrator import clustering_node as _clustering_node
 
-    agent = OrchestratorAgent()
-    candidates = agent.run_clustering(
-        library_path=state["full_library_path"],
-        method=state.get("cluster_method", "Butina"),
-        target_size=100000,
-        knowledge_base=state.get("knowledge_base"),
-    )
-
-    return {
-        "pipeline_stage": "clustering",
-        "candidate_pool": candidates,
-        "surviving_pool": candidates,
-        "cluster_count": state.get("cluster_count", 0),
-        "event_log": [f"[Clustering] {len(candidates)} representatives selected."],
-        **update_timestamp(state),
-    }
+    return _clustering_node(state)
 
 
 def watchdog_node(state: MACVSState) -> Dict:
