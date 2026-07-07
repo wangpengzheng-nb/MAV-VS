@@ -165,54 +165,21 @@ def htvs_node(state: MACVSState) -> Dict:
 
 
 def medchem_node(state: MACVSState) -> Dict:
-    """Step 5: MedChem Committee — 绝对值淘汰。
+    """Step 5: MedChem Committee — 三级联漏斗绝对值淘汰。
 
-    药化委员会 (三专家: 结构/ADMET/合成) 读取 Step 1 的动态规则，
-    调用 RDKit/PLIP 等工具对每个分子打分。
-    采用一票否决制排除 PAINS、毒性、合成不可及分子。
-    目标: 保留 Top 300。
+    委托给 src.agents.expert_committee.medchem_filter_node 执行:
+      Tier 0: 动态对接阈值截断 (阳性对照导向)
+      Tier 1: 2D 物理化学一票否决 (RDKit + SMARTS 黑名单)
+      Tier 2: 3D 与 AI 多维深度图谱 (PLIP/ML/ADMET Mock)
+
+    返回的 partial state update 包含:
+      - surviving_pool: 连过三关的分子
+      - committee_reports: 各 Tier 统计报告
+      - screened_records: 归档被淘汰分子
     """
-    from src.agents.expert_committee import MedChemCommittee
+    from src.agents.expert_committee import medchem_filter_node
 
-    committee = MedChemCommittee(members=state["committee_members"])
-    result = committee.evaluate_batch(
-        molecules=state["surviving_pool"],
-        filter_protocol=state["filter_protocol"],
-    )
-
-    survivors = result.get("passed", [])
-    vetoed = result.get("vetoed", [])
-
-    if len(survivors) < 10:
-        # 存活分子过少 → 策略可能过严，回退到 Step 1 放宽规则
-        return {
-            "pipeline_stage": "strategy",  # 触发回退
-            "event_log": [
-                f"[MedChem] Only {len(survivors)} survived — "
-                f"threshold too strict. Relaxing protocol and retrying."
-            ],
-            "errors": [{
-                "node": "medchem_filter",
-                "timestamp": state["updated_at"],
-                "message": f"Insufficient survivors ({len(survivors)}). Triggering protocol relaxation.",
-            }],
-            **update_timestamp(state),
-        }
-
-    return {
-        "pipeline_stage": "medchem_filter",
-        "surviving_pool": survivors,
-        "committee_reports": result.get("reports", []),
-        "screened_records": {
-            **state["screened_records"],
-            **{m["mol_id"]: m for m in vetoed},
-        },
-        "event_log": [
-            f"[MedChem] {len(survivors)} passed, {len(vetoed)} vetoed. "
-            f"Veto reasons: {result.get('veto_reasons', {})}"
-        ],
-        **update_timestamp(state),
-    }
+    return medchem_filter_node(state)
 
 
 def ranking_node(state: MACVSState) -> Dict:
