@@ -84,51 +84,20 @@ def clustering_node(state: MACVSState) -> Dict:
 
 
 def watchdog_node(state: MACVSState) -> Dict:
-    """Step 3: Watchdog — 小样本演习 + 参数锁定。
+    """Step 3: Watchdog — 小样本演习 + LLM 自纠错闭环。
 
-    选取 <10 个已知分子（阳性对照 + 诱饵 decoy）进行对接和 MD 试跑，
-    自动纠错并锁定最优 Grid Box、对接穷举度、MD 力场等参数。
+    委托给 src.agents.watchdog.watchdog_node 执行完整的:
+      Mock 对接 → 故意报错 → LLM 解析日志 → 输出 WatchdogCorrection
+      → 自动修正 grid_center/grid_size/exhaustiveness → 重新对接
+      → ... → 演习通过 (参数锁定) / 重试耗尽 (异常终止)
 
-    如果演习失败，自动调整参数重试 (self-correction loop)。
-    重试次数超限则标记异常并跳转至 error。
+    返回的 partial state update 包含:
+      - watchdog_config: 锁定的对接/MD 参数 (成功时)
+      - watchdog_retry_count: 重置为 0 (成功) 或递增 (失败)
     """
-    from src.agents.watchdog import WatchdogAgent
+    from src.agents.watchdog import watchdog_node as _watchdog_node
 
-    agent = WatchdogAgent()
-    result = agent.run_dry_run(
-        target_info=state["target_info"],
-        positive_control_smiles=None,  # 由 agent 从知识库或用户输入获取
-        decoy_smiles_list=None,
-        max_retries=state["watchdog_max_retries"],
-        retry_count=state["watchdog_retry_count"],
-    )
-
-    if result.get("success"):
-        return {
-            "pipeline_stage": "watchdog",
-            "watchdog_config": result.get("config"),
-            "watchdog_retry_count": 0,
-            "event_log": [f"[Watchdog] Dry-run passed. Params locked."],
-            **update_timestamp(state),
-        }
-    else:
-        new_retry = state["watchdog_retry_count"] + 1
-        if new_retry >= state["watchdog_max_retries"]:
-            return {
-                "pipeline_stage": "error",
-                "errors": [{
-                    "node": "watchdog",
-                    "timestamp": state["updated_at"],
-                    "message": f"Watchdog dry-run failed after {new_retry} retries.",
-                }],
-                "event_log": [f"[Watchdog] MAX RETRIES EXCEEDED. Pipeline halted."],
-                **update_timestamp(state),
-            }
-        return {
-            "watchdog_retry_count": new_retry,
-            "event_log": [f"[Watchdog] Retry {new_retry}/{state['watchdog_max_retries']}..."],
-            **update_timestamp(state),
-        }
+    return _watchdog_node(state)
 
 
 def htvs_node(state: MACVSState) -> Dict:
