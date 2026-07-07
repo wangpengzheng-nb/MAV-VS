@@ -786,14 +786,14 @@ def scouting_node(state: dict) -> dict:
     prev_version = state.get("protocol_version", 0)
     protocol["version"] = prev_version + 1
 
-  # ---- 5. 写回状态 ----
+# ---- 5. 写回状态 ----
     timestamp = datetime.now(timezone.utc).isoformat()
     return {
-        "pipeline_stage": "scouting",           # 修正: 对应 state.py 的新命名
-        "rulebook": protocol,                   # 修正: filter_protocol -> rulebook
-        "rulebook_version": prev_version + 1,
+        "pipeline_stage": "strategy",           # 恢复为 workflow 路由期望的 "strategy"
+        "filter_protocol": protocol,            # 恢复为 state.py 期望的 "filter_protocol"
+        "protocol_version": prev_version + 1,
         "updated_at": timestamp,
-        "log": [                                # 修正: event_log -> log
+        "event_log": [                          # 恢复为 state.py 中定义的 "event_log"
             f"[{timestamp}] [Strategy] Protocol v{prev_version + 1} generated. "
             f"Category: {protocol.get('rule_category', 'N/A')}. "
             f"MW range: {protocol.get('mw_range', 'N/A')}."
