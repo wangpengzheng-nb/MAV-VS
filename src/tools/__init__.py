@@ -13,6 +13,9 @@ from src.tools.molecular_utils import (
     GNINADocker,
     # GROMACS
     GromacsMDRunner,
+    # ADMET-AI
+    ADMETAIPredictor,
+    ADMET_CRITICAL_PROPERTIES,
     # 预处理
     PrepUtils,
     # 路径常量
@@ -29,6 +32,8 @@ __all__ = [
     "SDFUtils",
     "GNINADocker",
     "GromacsMDRunner",
+    "ADMETAIPredictor",
+    "ADMET_CRITICAL_PROPERTIES",
     "PrepUtils",
     "GNINA_BINARY",
     "SMINA_BINARY",

@@ -488,13 +488,10 @@ class MedChemCommittee:
             mol["mlp_pred_dG"] = ml_result["mlp_pred_dG"]
             mol["mlp_uncertainty"] = ml_result["mlp_uncertainty"]
 
-            # ---- 2c. ADMET AI (Mock) ----
+            # ---- 2c. ADMET AI (真实调用) ----
             admet_ai = self._run_admet_ai(mol)
             if isinstance(mol.get("admet_flags"), dict):
-                mol["admet_flags"]["hepatotoxicity_risk"] = admet_ai["hepatotoxicity_risk"]
-                mol["admet_flags"]["hERG_blocker_risk"] = admet_ai["hERG_blocker_risk"]
-                mol["admet_flags"]["BBB_penetration"] = admet_ai["BBB_penetration"]
-                mol["admet_flags"]["CYP2D6_inhibitor"] = admet_ai["CYP2D6_inhibitor"]
+                mol["admet_flags"].update(admet_ai)
 
         return molecules
 
@@ -589,34 +586,64 @@ class MedChemCommittee:
 
     @staticmethod
     def _run_admet_ai(mol: MoleculeRecord) -> Dict[str, Any]:
-        """Mock: 模拟 AI 驱动的 ADMET 深度预测。
+        """真实 ADMET-AI 预测: 调用 Chemprop v2 模型预测 40+ ADMET 属性。
 
-        在生产环境中，此函数将:
-          1. 调用 ADMETlab 3.0 API 或本地模型
-          2. 预测肝毒性 (hepatotoxicity)
-          3. 预测 hERG 抑制
-          4. 预测血脑屏障穿透
-          5. 预测 CYP450 酶抑制谱
+        使用本地 ADMET-AI 包 (admet_ai.ADMETModel) 进行推理:
+          - 理化性质: MW, LogP, TPSA, QED, Lipinski, HBD/HBA, PAINS/BRENK/NIH 警示
+          - 吸收: HIA, Bioavailability, Solubility, Caco-2, PAMPA, Pgp
+          - 分布: BBB, PPBR, VDss
+          - 代谢: CYP1A2/2C19/2C9/2D6/3A4 抑制 + 底物
+          - 排泄: Half-Life, Clearance
+          - 毒性: hERG, AMES, DILI, ClinTox, Carcinogens, LD50, Skin, NR/SR 面板
 
         Returns:
-            {
-                "hepatotoxicity_risk": str,   # "low" / "medium" / "high"
-                "hERG_blocker_risk": str,
-                "BBB_penetration": str,       # "yes" / "no" / "borderline"
-                "CYP2D6_inhibitor": str,
-                "CYP3A4_inhibitor": str,
-            }
+            Dict 包含全部 ADMET-AI 原始预测值 + 关键 flag 二值化标记。
+            失败时返回空 dict (降级,不阻塞管道)。
         """
-        seed = hash(mol.get("mol_id", "") + "_admet") % (2 ** 31)
-        rng = random.Random(seed)
+        smiles = mol.get("smiles", "")
+        if not smiles:
+            return {}
 
-        return {
-            "hepatotoxicity_risk": rng.choice(["low", "low", "low", "medium", "high"]),
-            "hERG_blocker_risk": rng.choice(["low", "low", "medium", "high"]),
-            "BBB_penetration": rng.choice(["no", "no", "borderline", "yes"]),
-            "CYP2D6_inhibitor": rng.choice(["no", "no", "no", "yes"]),
-            "CYP3A4_inhibitor": rng.choice(["no", "no", "yes", "yes"]),
-        }
+        try:
+            from src.tools.molecular_utils import ADMETAIPredictor
+
+            preds = ADMETAIPredictor.predict_single(smiles)
+            if not preds:
+                return {}
+
+            # 关键毒性/警示标记 (用于一票否决)
+            flags = ADMETAIPredictor.get_flag_dict(smiles)
+
+            # 组装返回值: 全部原始预测 + flag
+            result = dict(preds)
+            result["hERG_blocker_risk"] = "high" if flags.get("hERG") else "low"
+            result["hepatotoxicity_risk"] = "high" if flags.get("DILI") else "low"
+            result["mutagenicity_risk"] = "high" if flags.get("AMES") else "low"
+            result["BBB_penetration"] = "yes" if flags.get("BBB_Martins") else "no"
+            result["CYP2D6_inhibitor"] = "yes" if flags.get("CYP2D6_Veith") else "no"
+            result["CYP3A4_inhibitor"] = "yes" if flags.get("CYP3A4_Veith") else "no"
+            result["Pgp_inhibitor"] = "yes" if flags.get("Pgp_Broccatelli") else "no"
+            result["oral_bioavailable"] = "yes" if flags.get("Bioavailability_Ma") else "no"
+            result["PAINS_alert_flag"] = flags.get("PAINS_alert", False)
+            result["BRENK_alert_flag"] = flags.get("BRENK_alert", False)
+
+            return result
+
+        except ImportError:
+            # ADMET-AI 未安装 → 降级到 mock
+            import random as _random
+            seed = hash(mol.get("mol_id", "") + "_admet") % (2 ** 31)
+            rng = _random.Random(seed)
+            return {
+                "hepatotoxicity_risk": rng.choice(["low", "low", "low", "medium", "high"]),
+                "hERG_blocker_risk": rng.choice(["low", "low", "medium", "high"]),
+                "BBB_penetration": rng.choice(["no", "no", "borderline", "yes"]),
+                "CYP2D6_inhibitor": rng.choice(["no", "no", "no", "yes"]),
+                "CYP3A4_inhibitor": rng.choice(["no", "no", "yes", "yes"]),
+                "_fallback": "mock_admet_ai_not_installed",
+            }
+        except Exception:
+            return {}
 
     # =========================================================================
     # 辅助方法

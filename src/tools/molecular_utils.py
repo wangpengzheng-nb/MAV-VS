@@ -986,3 +986,187 @@ class PrepUtils:
             chunks.append(chunk_path)
 
         return chunks
+
+
+# =============================================================================
+# ADMET-AI 集成 (真实 ML 预测)
+# =============================================================================
+
+# ADMET-AI 提供的 42 个预测属性分类:
+#   Physicochemical (9): MW, LogP, HBD, HBA, Lipinski, QED, TPSA, PAINS/BRENK/NIH
+#   Absorption (7):      HIA, Bioavailability, Solubility, Lipophilicity, Caco-2, PAMPA, Pgp
+#   Distribution (3):    BBB, PPBR, VDss
+#   Excretion (2):       Half-Life, Clearance (Hepatocyte/Microsome)
+#   Metabolism (8):      CYP1A2/2C19/2C9/2D6/3A4 Inhibition + CYP2C9/2D6/3A4 Substrate
+#   Toxicity (13):       hERG, ClinTox, AMES, DILI, Carcinogens, LD50, Skin, NR/SR panels
+
+# 与 MedChem Committee 联动的关键阈值
+ADMET_CRITICAL_PROPERTIES = [
+    "hERG",           # hERG 阻断 → >0.5 则 veto
+    "AMES",           # 致突变性 → >0.5 则 veto
+    "DILI",           # 肝毒性 → >0.5 则 veto
+    "ClinTox",        # 临床毒性 → >0.5 则 veto
+    "Carcinogens_Lagunin",  # 致癌性 → >0.5 则 veto
+    "BBB_Martins",    # 血脑屏障 (CNS靶点需关注)
+    "HIA_Hou",         # 人体肠道吸收
+    "Bioavailability_Ma",  # 口服生物利用度
+    "Pgp_Broccatelli",     # P-糖蛋白抑制
+    "CYP2D6_Veith",   # CYP2D6 抑制
+    "CYP3A4_Veith",   # CYP3A4 抑制
+    "CYP1A2_Veith",   # CYP1A2 抑制
+    "CYP2C9_Veith",   # CYP2C9 抑制
+    "CYP2C19_Veith",  # CYP2C19 抑制
+    "LD50_Zhu",       # 急性毒性
+    "Skin_Reaction",  # 皮肤反应
+    "PAINS_alert",    # PAINS 假阳性
+    "BRENK_alert",    # BRENK 预警
+    "Lipinski",       # 五规则违规数
+]
+
+
+class ADMETAIPredictor:
+    """ADMET-AI 真实 ML 预测封装。
+
+    使用 Chemprop v2 模型对 40+ ADMET 属性进行预测。
+    替换 expert_committee.py 中的 Tier 2 mock _run_admet_ai()。
+    """
+
+    _model = None  # 单例模型
+
+    @classmethod
+    def _get_model(cls):
+        """惰性加载 ADMET-AI 模型（单例，加载需约30秒）。"""
+        if cls._model is None:
+            from admet_ai import ADMETModel
+            cls._model = ADMETModel()
+        return cls._model
+
+    @classmethod
+    def predict_single(cls, smiles: str) -> Dict[str, Any]:
+        """对单个分子预测全部 ADMET 属性。
+
+        Args:
+            smiles: SMILES 字符串。
+
+        Returns:
+            {property_name: value, ...} 42 个 ADMET 属性字典。
+            如果预测失败，返回空 dict。
+        """
+        if not smiles:
+            return {}
+        try:
+            model = cls._get_model()
+            preds = model.predict(smiles=smiles)
+            return preds if isinstance(preds, dict) else {}
+        except Exception:
+            return {}
+
+    @classmethod
+    def predict_batch(
+        cls,
+        smiles_list: List[str],
+        batch_size: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """对一批分子预测 ADMET 属性。
+
+        Args:
+            smiles_list: SMILES 字符串列表。
+            batch_size: 每批处理数量。
+
+        Returns:
+            [{property: value, ...}, ...] 与输入一一对应。
+        """
+        if not smiles_list:
+            return []
+
+        results = []
+        for i in range(0, len(smiles_list), batch_size):
+            batch = smiles_list[i:i + batch_size]
+            try:
+                model = cls._get_model()
+                df = model.predict(smiles=batch)
+                # DataFrame → list of dicts
+                batch_results = df.to_dict(orient="records")
+                results.extend(batch_results)
+            except Exception:
+                # 批量失败时逐条重试
+                for smi in batch:
+                    results.append(cls.predict_single(smi))
+
+        return results
+
+    @classmethod
+    def get_flag_dict(cls, smiles: str) -> Dict[str, bool]:
+        """获取分子的关键 ADMET 二值标记。
+
+        将连续概率阈值化 (>0.5 → True)，用于 MedChem 一票否决。
+
+        Args:
+            smiles: SMILES 字符串。
+
+        Returns:
+            {flag_name: bool, ...} 如 {"hERG": True, "AMES": False, ...}
+        """
+        preds = cls.predict_single(smiles)
+        if not preds:
+            return {}
+
+        flags = {}
+        # 分类属性阈值化
+        classification_keys = [
+            "hERG", "AMES", "DILI", "ClinTox", "Carcinogens_Lagunin",
+            "HIA_Hou", "Bioavailability_Ma", "Pgp_Broccatelli",
+            "CYP1A2_Veith", "CYP2C19_Veith", "CYP2C9_Veith",
+            "CYP2D6_Veith", "CYP3A4_Veith",
+            "CYP2C9_Substrate_CarbonMangels", "CYP2D6_Substrate_CarbonMangels",
+            "CYP3A4_Substrate_CarbonMangels",
+            "BBB_Martins", "PAMPA_NCATS", "Skin_Reaction",
+            "NR-AR", "NR-AR-LBD", "NR-AhR", "NR-Aromatase",
+            "NR-ER", "NR-ER-LBD", "NR-PPAR-gamma",
+            "SR-ARE", "SR-ATAD5", "SR-HSE", "SR-MMP", "SR-p53",
+        ]
+        for key in classification_keys:
+            val = preds.get(key)
+            if val is not None:
+                flags[key] = float(val) > 0.5
+
+        # PAINS/BRENK 整数值 (>0 表示有警示)
+        for alert_key in ["PAINS_alert", "BRENK_alert", "NIH_alert"]:
+            val = preds.get(alert_key)
+            if val is not None:
+                flags[alert_key] = int(val) > 0
+
+        return flags
+
+    @classmethod
+    def get_toxicity_veto_list(cls, smiles: str) -> List[str]:
+        """获取分子的毒性否决项列表。
+
+        对 hERG/AMES/DILI/ClinTox/Carcinogens PAINS BRENK 进行阈值判断。
+
+        Returns:
+            触发否决的属性名列表。空列表表示通过。
+        """
+        preds = cls.predict_single(smiles)
+        vetoed = []
+
+        checks = {
+            "hERG_blocker": ("hERG", 0.5, "hERG 钾通道阻断风险"),
+            "mutagenicity": ("AMES", 0.5, "Ames 致突变性"),
+            "hepatotoxicity": ("DILI", 0.5, "药物性肝损伤风险"),
+            "clinical_toxicity": ("ClinTox", 0.5, "临床毒性风险"),
+            "carcinogenicity": ("Carcinogens_Lagunin", 0.5, "致癌性风险"),
+        }
+
+        for flag_name, (key, threshold, label) in checks.items():
+            val = preds.get(key)
+            if val is not None and float(val) > threshold:
+                vetoed.append(f"Tox_{flag_name}: {label} (prob={float(val):.2f})")
+
+        # PAINS / BRENK
+        for alert_key, label in [("PAINS_alert", "PAINS"), ("BRENK_alert", "BRENK")]:
+            val = preds.get(alert_key)
+            if val is not None and int(val) > 0:
+                vetoed.append(f"Alert_{label}: {label} warning ({int(val)} alerts)")
+
+        return vetoed
