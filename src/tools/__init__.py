@@ -16,6 +16,10 @@ from src.tools.molecular_utils import (
     # ADMET-AI
     ADMETAIPredictor,
     ADMET_CRITICAL_PROPERTIES,
+    # PLIP
+    PLIPAnalyzer,
+    PLIP_BINARY,
+    PLIP_CONDA_ENV,
     # 预处理
     PrepUtils,
     # 路径常量
@@ -34,6 +38,9 @@ __all__ = [
     "GromacsMDRunner",
     "ADMETAIPredictor",
     "ADMET_CRITICAL_PROPERTIES",
+    "PLIPAnalyzer",
+    "PLIP_BINARY",
+    "PLIP_CONDA_ENV",
     "PrepUtils",
     "GNINA_BINARY",
     "SMINA_BINARY",

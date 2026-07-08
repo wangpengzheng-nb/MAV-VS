@@ -1170,3 +1170,506 @@ class ADMETAIPredictor:
                 vetoed.append(f"Alert_{label}: {label} warning ({int(val)} alerts)")
 
         return vetoed
+
+
+# =============================================================================
+# PLIP 集成 (Protein-Ligand Interaction Profiler)
+# =============================================================================
+
+PLIP_BINARY = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/plip"
+PLIP_CONDA_ENV = "plip"
+PLIP_SCORING_SCRIPT = "/users_home/wangpengzheng/.claude/skills/plip-interaction-scoring/scripts/score_plip_interactions.py"
+
+# 相互作用类型映射 (PLIP XML tag → 标准名)
+PLIP_INTERACTION_MAP = {
+    "hydrophobic_interactions": "hydrophobic_contacts",
+    "hydrogen_bonds": "hydrogen_bonds",
+    "water_bridges": "water_bridges",
+    "salt_bridges": "salt_bridges",
+    "pi_stacks": "pi_stacking",
+    "pi_cation_interactions": "pi_cation",
+    "halogen_bonds": "halogen_bonds",
+    "metal_complexes": "metal_complexes",
+}
+
+# 默认评分权重 (靶点无关的通用权重, 可通过 key_residues 覆写)
+PLIP_SCORE_WEIGHTS = {
+    "key_hbond": 3,         # 与关键残基的氢键
+    "other_hbond_short": 2, # 其他氢键 (距离≤3.5Å)
+    "hydrophobic_contact": 1,
+    "salt_bridge": 3,
+    "pi_stacking": 2,
+    "pi_cation": 2,
+    "halogen_bond": 2,
+}
+
+
+class PLIPAnalyzer:
+    """PLIP (Protein-Ligand Interaction Profiler) 分析封装。
+
+    运行 PLIP 分析蛋白-配体复合物，解析相互作用指纹，
+    使用动态关键残基 (来自 TargetInfo) 进行评分。
+    """
+
+    @staticmethod
+    def parse_key_residues(
+        key_residues: List[str],
+        default_chain: str = "A",
+    ) -> set:
+        """将 TargetInfo 格式的关键残基转换为 PLIP 匹配格式。
+
+        输入格式: ["ASP103", "TRP144", "GLY145"]
+        输出格式: {("ASP", "103", "A"), ("TRP", "144", "A"), ...}
+
+        支持格式:
+          - "ASP103"    → ("ASP", "103", default_chain)
+          - "ASP103A"   → ("ASP", "103", "A")
+          - "ASP:103:A" → ("ASP", "103", "A")
+        """
+        import re
+        key_set = set()
+        for residue in key_residues:
+            residue = residue.strip()
+            if not residue:
+                continue
+
+            # 尝试多种解析模式
+            # 模式1: "ASP:103:A" 或 "ASP103A"
+            match = re.match(r'([A-Za-z]+)[:\s]*(\d+)[:\s]*([A-Za-z]?)', residue)
+            if match:
+                restype = match.group(1).upper()
+                resnr = match.group(2)
+                chain = match.group(3) if match.group(3) else default_chain
+                key_set.add((restype, resnr, chain.upper()))
+                continue
+
+            # 模式2: "ASP103" (字母+数字, 无链)
+            match = re.match(r'([A-Za-z]+)(\d+)', residue)
+            if match:
+                restype = match.group(1).upper()
+                resnr = match.group(2)
+                key_set.add((restype, resnr, default_chain))
+
+        return key_set
+
+    @staticmethod
+    def run_single(
+        complex_pdb: str,
+        output_dir: str,
+        source_id: str = "",
+    ) -> Dict[str, Any]:
+        """对单个蛋白-配体复合物运行 PLIP。
+
+        Args:
+            complex_pdb: 复合物 PDB 文件路径。
+            output_dir: 输出目录 (存放 report.xml/report.txt)。
+            source_id: 分子标识符 (如 mol_id)。
+
+        Returns:
+            {
+                "success": bool,
+                "report_xml": str,
+                "report_txt": str,
+                "source_id": str,
+                "error": str or None,
+            }
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        report_xml = os.path.join(output_dir, "report.xml")
+        report_txt = os.path.join(output_dir, "report.txt")
+
+        if not os.path.exists(complex_pdb):
+            return {
+                "success": False, "report_xml": report_xml,
+                "report_txt": report_txt, "source_id": source_id,
+                "error": f"Complex PDB not found: {complex_pdb}",
+            }
+
+        cmd = (
+            f"source {CONDA_BASE} && "
+            f"conda activate {PLIP_CONDA_ENV} && "
+            f"{PLIP_BINARY} -f {complex_pdb} -o {output_dir} -x -t --maxthreads 1"
+        )
+
+        try:
+            result = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                return {
+                    "success": False, "report_xml": report_xml,
+                    "report_txt": report_txt, "source_id": source_id,
+                    "error": f"PLIP failed (rc={result.returncode}): {result.stderr[:200]}",
+                }
+            if not os.path.exists(report_xml):
+                return {
+                    "success": False, "report_xml": report_xml,
+                    "report_txt": report_txt, "source_id": source_id,
+                    "error": "PLIP ran but no report.xml produced",
+                }
+            return {
+                "success": True, "report_xml": report_xml,
+                "report_txt": report_txt, "source_id": source_id,
+                "error": None,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False, "report_xml": report_xml,
+                "report_txt": report_txt, "source_id": source_id,
+                "error": "PLIP timed out (>120s)",
+            }
+        except Exception as e:
+            return {
+                "success": False, "report_xml": report_xml,
+                "report_txt": report_txt, "source_id": source_id,
+                "error": str(e),
+            }
+
+    @staticmethod
+    def parse_report_xml(
+        report_xml: str,
+        source_id: str = "",
+    ) -> Dict[str, Any]:
+        """解析 PLIP report.xml，提取所有相互作用的结构化数据。
+
+        Args:
+            report_xml: report.xml 文件路径。
+            source_id: 分子 ID。
+
+        Returns:
+            {
+                "source_id": str,
+                "interactions": {
+                    "hydrogen_bonds": [{resnr, restype, reschain, distance, ...}, ...],
+                    "hydrophobic_contacts": [...],
+                    "salt_bridges": [...],
+                    ...
+                },
+                "summary": {type: count, ...},
+                "interacting_residues": set,
+                "status": "ok" | "missing" | "parse_error",
+            }
+        """
+        if not os.path.exists(report_xml):
+            return {"source_id": source_id, "interactions": {},
+                    "summary": {}, "interacting_residues": set(),
+                    "status": "missing"}
+
+        try:
+            import xml.etree.ElementTree as ET
+
+            tree = ET.parse(report_xml)
+            root = tree.getroot()
+
+            interactions: Dict[str, List[Dict]] = {}
+            summary: Dict[str, int] = {}
+            all_residues: set = set()
+
+            for site in root.findall(".//bindingsite"):
+                inter_elem = site.find("interactions")
+                if inter_elem is None:
+                    continue
+
+                for container in inter_elem:
+                    itype = PLIP_INTERACTION_MAP.get(container.tag, container.tag)
+                    entries = list(container)
+                    summary[itype] = summary.get(itype, 0) + len(entries)
+
+                    parsed = []
+                    for item in entries:
+                        row = {
+                            "resnr": (item.findtext("resnr") or "").strip(),
+                            "restype": (item.findtext("restype") or "").strip(),
+                            "reschain": (item.findtext("reschain") or "").strip(),
+                            "distance": (
+                                item.findtext("dist")
+                                or item.findtext("distance")
+                                or item.findtext("centdist")
+                                or ""
+                            ).strip(),
+                        }
+                        if row["restype"] or row["resnr"]:
+                            all_residues.add(
+                                f"{row['restype']}{row['resnr']}{row['reschain']}"
+                            )
+                        parsed.append(row)
+                    interactions[itype] = parsed
+
+            return {
+                "source_id": source_id,
+                "interactions": interactions,
+                "summary": summary,
+                "interacting_residues": all_residues,
+                "status": "ok",
+            }
+        except Exception as e:
+            return {
+                "source_id": source_id, "interactions": {},
+                "summary": {}, "interacting_residues": set(),
+                "status": f"parse_error: {e}",
+            }
+
+    @staticmethod
+    def score_interactions(
+        parsed: Dict[str, Any],
+        key_residues: Optional[set] = None,
+        weights: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """对 PLIP 解析结果进行动态评分。
+
+        使用靶点特定的关键残基集 (而非硬编码 BCL2 残基) 计算评分。
+
+        评分规则:
+          - 与关键残基的氢键: +key_hbond (默认 3)
+          - 其他氢键 (距离 ≤3.5Å): +other_hbond_short (默认 2)
+          - 疏水接触: +hydrophobic_contact (默认 1)
+          - 盐桥: +salt_bridge (默认 3)
+          - π-π堆积: +pi_stacking (默认 2)
+          - π-阳离子: +pi_cation (默认 2)
+          - 卤键: +halogen_bond (默认 2)
+
+        Args:
+            parsed: parse_report_xml() 的输出。
+            key_residues: 靶点关键残基集 {("ASP","103","A"), ...}。
+            weights: 自定义评分权重 (None 则用默认)。
+
+        Returns:
+            {
+                "plip_score": int,
+                "key_hbond_count": int,
+                "total_hbond_count": int,
+                "key_hbond_residues": str,
+                "all_hbond_residues": str,
+                "hydrophobic_count": int,
+                "salt_bridge_count": int,
+                "matched_rules": str,
+                "structural_score": float,  # 归一化到 0-1 的结构互补性评分
+            }
+        """
+        if key_residues is None:
+            key_residues = set()
+        if weights is None:
+            weights = dict(PLIP_SCORE_WEIGHTS)
+
+        interactions = parsed.get("interactions", {})
+        score = 0
+        matched: List[str] = []
+
+        # 氢键评分
+        hbonds = interactions.get("hydrogen_bonds", [])
+        key_hbond_count = 0
+        total_hbond_count = len(hbonds)
+        key_hbond_residues: set = set()
+        all_hbond_residues: set = set()
+
+        for hb in hbonds:
+            label = f"{hb['restype']}{hb['resnr']}{hb['reschain']}"
+            all_hbond_residues.add(label)
+            distance = None
+            try:
+                distance = float(hb["distance"]) if hb["distance"] else None
+            except ValueError:
+                pass
+
+            if (hb["restype"], hb["resnr"], hb["reschain"]) in key_residues:
+                score += weights.get("key_hbond", 3)
+                key_hbond_count += 1
+                key_hbond_residues.add(label)
+                matched.append(f"{label}/key_hbond:+{weights.get('key_hbond', 3)}")
+            elif distance is not None and distance <= 3.5:
+                score += weights.get("other_hbond_short", 2)
+                matched.append(f"{label}/hbond_short:+{weights.get('other_hbond_short', 2)}")
+
+        # 疏水接触
+        hydrophobic = interactions.get("hydrophobic_contacts", [])
+        for _ in hydrophobic:
+            score += weights.get("hydrophobic_contact", 1)
+        if hydrophobic:
+            matched.append(f"hydrophobic_contacts x{len(hydrophobic)}:+{len(hydrophobic) * weights.get('hydrophobic_contact', 1)}")
+
+        # 盐桥
+        salt_bridges = interactions.get("salt_bridges", [])
+        for _ in salt_bridges:
+            score += weights.get("salt_bridge", 3)
+        if salt_bridges:
+            matched.append(f"salt_bridges x{len(salt_bridges)}:+{len(salt_bridges) * weights.get('salt_bridge', 3)}")
+
+        # π-π 堆积
+        pi_stacks = interactions.get("pi_stacking", [])
+        for _ in pi_stacks:
+            score += weights.get("pi_stacking", 2)
+
+        # π-阳离子
+        pi_cation = interactions.get("pi_cation", [])
+        for _ in pi_cation:
+            score += weights.get("pi_cation", 2)
+
+        # 卤键
+        halogen = interactions.get("halogen_bonds", [])
+        for _ in halogen:
+            score += weights.get("halogen_bond", 2)
+
+        # structural_score: 归一化到 0-1
+        # 基于: 氢键密度 + 疏水密度 + 特殊相互作用
+        max_score = max(score, 20)  # 避免除零
+        structural_score = min(1.0, score / 15.0)  # 15分≈满分
+
+        return {
+            "plip_score": score,
+            "key_hbond_count": key_hbond_count,
+            "total_hbond_count": total_hbond_count,
+            "key_hbond_residues": ";".join(sorted(key_hbond_residues)),
+            "all_hbond_residues": ";".join(sorted(all_hbond_residues)),
+            "hydrophobic_count": len(hydrophobic),
+            "salt_bridge_count": len(salt_bridges),
+            "pi_stack_count": len(pi_stacks),
+            "pi_cation_count": len(pi_cation),
+            "halogen_bond_count": len(halogen),
+            "matched_rules": ";".join(matched),
+            "structural_score": round(structural_score, 3),
+        }
+
+    @staticmethod
+    def run_and_score(
+        complex_pdb: str,
+        output_dir: str,
+        source_id: str,
+        key_residues: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """一步完成: PLIP 运行 + XML 解析 + 动态评分。
+
+        这是供 MedChem Tier 2 调用的高层接口。
+
+        Args:
+            complex_pdb: 复合物 PDB 路径。
+            output_dir: PLIP 输出目录。
+            source_id: 分子 ID。
+            key_residues: 关键残基列表 (如 ["ASP103", "TRP144"])。
+
+        Returns:
+            包含 run_status + parse_status + plip_score + structural_score 的完整字典。
+        """
+        # Step 1: Run PLIP
+        run_result = PLIPAnalyzer.run_single(
+            complex_pdb=complex_pdb,
+            output_dir=output_dir,
+            source_id=source_id,
+        )
+
+        if not run_result["success"]:
+            return {
+                "source_id": source_id,
+                "run_status": "failed",
+                "run_error": run_result.get("error"),
+                "parse_status": "skipped",
+                "plip_score": 0,
+                "structural_score": 0.0,
+                "key_hbond_count": 0,
+                "total_hbond_count": 0,
+                "hydrophobic_count": 0,
+                "salt_bridge_count": 0,
+            }
+
+        # Step 2: Parse XML
+        parsed = PLIPAnalyzer.parse_report_xml(
+            report_xml=run_result["report_xml"],
+            source_id=source_id,
+        )
+
+        if parsed["status"] != "ok":
+            return {
+                "source_id": source_id,
+                "run_status": "ok",
+                "parse_status": parsed["status"],
+                "plip_score": 0,
+                "structural_score": 0.0,
+                "key_hbond_count": 0,
+                "total_hbond_count": 0,
+                "hydrophobic_count": 0,
+                "salt_bridge_count": 0,
+            }
+
+        # Step 3: Dynamic scoring
+        residue_set = PLIPAnalyzer.parse_key_residues(key_residues or [])
+
+        scores = PLIPAnalyzer.score_interactions(
+            parsed=parsed,
+            key_residues=residue_set,
+        )
+
+        return {
+            "source_id": source_id,
+            "run_status": "ok",
+            "parse_status": "ok",
+            "plip_score": scores["plip_score"],
+            "structural_score": scores["structural_score"],
+            "key_hbond_count": scores["key_hbond_count"],
+            "total_hbond_count": scores["total_hbond_count"],
+            "key_hbond_residues": scores["key_hbond_residues"],
+            "all_hbond_residues": scores["all_hbond_residues"],
+            "hydrophobic_count": scores["hydrophobic_count"],
+            "salt_bridge_count": scores["salt_bridge_count"],
+            "pi_stack_count": scores["pi_stack_count"],
+            "halogen_bond_count": scores["halogen_bond_count"],
+            "matched_rules": scores["matched_rules"],
+        }
+
+
+    @staticmethod
+    def make_complex_pdb(
+        receptor_pdb: str,
+        ligand_sdf: str,
+        output_path: str,
+    ) -> bool:
+        """从受体PDB + 配体SDF 组装复合物PDB。
+
+        用于从对接姿态生成PLIP可读取的复合物结构。
+
+        Args:
+            receptor_pdb: 受体PDB路径。
+            ligand_sdf: 配体SDF路径 (单个配体姿态)。
+            output_path: 输出复合物PDB路径。
+
+        Returns:
+            True 如果成功。
+        """
+        if not _RDKIT_AVAILABLE:
+            return False
+
+        try:
+            # 读取受体
+            with open(receptor_pdb) as f:
+                receptor_lines = f.readlines()
+
+            # 读取配体
+            supplier = Chem.SDMolSupplier(ligand_sdf, sanitize=False, removeHs=False)
+            lig_mol = next(supplier, None)
+            if lig_mol is None:
+                return False
+
+            # 写入复合物
+            with open(output_path, "w") as f:
+                # 受体 ATOM/HETATM 行
+                for line in receptor_lines:
+                    if line.startswith(("ATOM", "HETATM", "TER")):
+                        f.write(line)
+
+                # 配体原子 (标记为 HETATM, 残基名 LIG)
+                conf = lig_mol.GetConformer()
+                atom_idx = 1
+                for atom in lig_mol.GetAtoms():
+                    pos = conf.GetAtomPosition(atom.GetIdx())
+                    f.write(
+                        f"HETATM{atom_idx:5d} {atom.GetSymbol():<4s} LIG A   1    "
+                        f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}"
+                        f"  1.00  0.00          {atom.GetSymbol():>2s}\n"
+                    )
+                    atom_idx += 1
+
+                # 结尾
+                f.write("TER\nEND\n")
+
+            return True
+        except Exception:
+            return False
