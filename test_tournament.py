@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║            👇 只需改这一行! 👇                                  ║
 # ╚══════════════════════════════════════════════════════════════════╝
-YOUR_QUERY = "寻找针对GID4的配体"
+YOUR_QUERY = "我要做一款治类风湿关节炎的药，靶点是 JAK1"
 # ╔══════════════════════════════════════════════════════════════════╝
 
 SEP = "=" * 70
@@ -111,7 +111,8 @@ def run_test():
     strat_dir = os.path.join(os.path.dirname(__file__), "分析文件", "strategies")
     os.makedirs(strat_dir, exist_ok=True)
     for i, s in enumerate(strategies, 1):
-        sf = os.path.join(strat_dir, f"strategy_{i:02d}_{s['strategy_name']}.md")
+        safe_name = s['strategy_name'].replace('/','_').replace('\\','_').replace(':','_')
+        sf = os.path.join(strat_dir, f"strategy_{i:02d}_{safe_name}.md")
         with open(sf, "w", encoding="utf-8") as f:
             f.write(f"# 策略 {i}: {s['strategy_name']}\n\n")
             f.write(f"**标签**: {s.get('strategy_tagline','')}\n\n")
