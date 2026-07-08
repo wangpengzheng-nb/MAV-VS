@@ -46,7 +46,7 @@ class MetaReviewAgent:
 
     def __init__(
         self,
-        llm_model: str = "deepseek-chat",
+        llm_model: str = "deepseek-reasoner",
         llm_api_base: Optional[str] = None,
         llm_temperature: float = 0.2,
     ):

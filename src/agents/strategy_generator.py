@@ -78,7 +78,7 @@ STRATEGY_DETAILED_PROMPT = """\
 # =============================================================================
 
 class StrategyGeneratorAgent:
-    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.4, max_tokens=8192):
+    def __init__(self, model="deepseek-reasoner", api_key=None, api_base=None, temperature=0.4, max_tokens=8192):
         self.model = model
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
@@ -108,16 +108,18 @@ class StrategyGeneratorAgent:
 **阈值必须引用调研报告中的具体数值!**
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model, temperature=self.temperature, max_tokens=self.max_tokens,
-                messages=[
-                    {"role": "system", "content": STRATEGY_DETAILED_PROMPT},
-                    {"role": "user", "content": prompt},
-                    {"role": "system", "content": f"JSON Schema:\n{json.dumps(DetailedStrategyOutput.model_json_schema(), indent=2, ensure_ascii=False)}"},
-                ],
-                response_format={"type": "json_object"},
-            )
-            validated = DetailedStrategyOutput.model_validate(json.loads(resp.choices[0].message.content.strip()))
+            is_reasoner = "reasoner" in self.model.lower()
+            kwargs = dict(model=self.model, max_tokens=self.max_tokens,
+                          messages=[{"role":"system","content":STRATEGY_DETAILED_PROMPT},
+                                    {"role":"user","content":prompt},
+                                    {"role":"system","content":f"必须输出纯JSON:\n{json.dumps(DetailedStrategyOutput.model_json_schema(),indent=2,ensure_ascii=False)}"}])
+            if not is_reasoner: kwargs.update(temperature=self.temperature, response_format={"type":"json_object"})
+            resp = self.client.chat.completions.create(**kwargs)
+            raw = resp.choices[0].message.content
+            if not raw or not raw.strip():
+                raw = getattr(resp.choices[0].message, "reasoning_content", "") or ""
+                if "{" in raw: raw = raw[raw.rfind("{"):]
+            validated = DetailedStrategyOutput.model_validate(json.loads(raw.strip()))
             return {"strategies": [s.model_dump() for s in validated.strategies],
                     "generation_rationale": validated.generation_rationale}
         except Exception as e:

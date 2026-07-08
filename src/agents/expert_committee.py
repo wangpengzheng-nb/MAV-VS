@@ -96,7 +96,7 @@ RED_TEAM_PROMPT = """\
 # =============================================================================
 
 class RedTeamReviewer:
-    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.5, max_tokens=6144):
+    def __init__(self, model="deepseek-reasoner", api_key=None, api_base=None, temperature=0.5, max_tokens=8192):
         self.model = model
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
@@ -158,16 +158,18 @@ class RedTeamReviewer:
 """
 
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model, temperature=self.temperature, max_tokens=self.max_tokens,
-                messages=[
-                    {"role": "system", "content": RED_TEAM_PROMPT},
-                    {"role": "user", "content": prompt},
-                    {"role": "system", "content": f"JSON:\n{json.dumps(DebateOutput.model_json_schema(), indent=2, ensure_ascii=False)}"},
-                ],
-                response_format={"type": "json_object"},
-            )
-            d = DebateOutput.model_validate(json.loads(resp.choices[0].message.content.strip()))
+            is_reasoner = "reasoner" in self.model.lower()
+            kwargs = dict(model=self.model, max_tokens=self.max_tokens,
+                          messages=[{"role":"system","content":RED_TEAM_PROMPT},
+                                    {"role":"user","content":prompt},
+                                    {"role":"system","content":f"必须输出纯JSON:\n{json.dumps(DebateOutput.model_json_schema(),indent=2,ensure_ascii=False)}"}])
+            if not is_reasoner: kwargs.update(temperature=self.temperature, response_format={"type":"json_object"})
+            resp = self.client.chat.completions.create(**kwargs)
+            raw = resp.choices[0].message.content
+            if not raw or not raw.strip():
+                raw = getattr(resp.choices[0].message, "reasoning_content", "") or ""
+                if "{" in raw: raw = raw[raw.rfind("{"):]
+            d = DebateOutput.model_validate(json.loads(raw.strip()))
             return {"attacks_on_a": [a.model_dump() for a in d.attacks_on_a],
                     "attacks_on_b": [a.model_dump() for a in d.attacks_on_b],
                     "debate_summary": d.debate_summary}

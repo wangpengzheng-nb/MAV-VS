@@ -105,7 +105,7 @@ class StrategyJudge:
 
     def __init__(
         self,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-reasoner",
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
         temperature: float = 0.1,
@@ -142,18 +142,18 @@ class StrategyJudge:
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                messages=[
-                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                    {"role": "system", "content": f"请严格输出 JSON:\n{json.dumps(StrategyVerdict.model_json_schema(), indent=2, ensure_ascii=False)}"},
-                ],
-                response_format={"type": "json_object"},
-            )
-            raw = response.choices[0].message.content.strip()
+            is_reasoner = "reasoner" in self.model.lower()
+            kwargs = dict(model=self.model, max_tokens=self.max_tokens,
+                          messages=[{"role":"system","content":JUDGE_SYSTEM_PROMPT},
+                                    {"role":"user","content":user_prompt},
+                                    {"role":"system","content":f"必须输出纯JSON:\n{json.dumps(StrategyVerdict.model_json_schema(),indent=2,ensure_ascii=False)}"}])
+            if not is_reasoner: kwargs.update(temperature=self.temperature, response_format={"type":"json_object"})
+            response = self.client.chat.completions.create(**kwargs)
+            raw = response.choices[0].message.content
+            if not raw or not raw.strip():
+                raw = getattr(response.choices[0].message, "reasoning_content", "") or ""
+                if "{" in raw: raw = raw[raw.rfind("{"):]
+            raw = raw.strip()
             parsed = json.loads(raw)
             verdict = StrategyVerdict.model_validate(parsed)
 

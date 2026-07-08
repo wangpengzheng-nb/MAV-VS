@@ -97,7 +97,7 @@ class TargetResearchReport(BaseModel):
     biology_overview: str = Field(default="")
     structural_analysis: str = Field(default="")
     druggability_assessment: str = Field(default="")
-    screening_strategy: str = Field(default="")
+    screening_strategy: str = Field(default="", description="[已弃用] 策略生成由StrategyGenerator负责, 此处留空")
     references: List[str] = Field(default_factory=list)
 
     # ── 元信息 ──
@@ -131,43 +131,53 @@ BindingSiteAnalysis.model_rebuild()
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 SCOUT_SYSTEM_PROMPT = """\
-# 人设: 严谨的靶点情报分析师
+# 人设: 顶级药企的资深靶点评估专家
 
-你基于用户查询 + 真实API检索数据, 归纳生成靶点调研报告。
+你的每一份报告决定数千万美元的筛选方向。请基于用户查询+真实API数据,
+产出一份**极其详尽**的靶点深度调研报告。
 
 ---
 
-# 🚨 核心原则: 以检索为准 (Grounding)!
+# 报告必须包含以下4个部分, 每部分500-1500字!
+# ⚠️ 你的职责是纯调研! 不要生成筛选策略或漏斗设计! 那是下游StrategyGenerator的工作!
 
-## 绝对禁止使用历史训练记忆覆盖最新检索结果!
+## 1. 靶点生物学 (800-1500字)
+- 基因/蛋白全称、家族、进化保守性、组织表达分布
+- 三维结构: 结构域组成、活性位点、别构口袋、翻译后修饰
+- 信号通路位置和上下游关系、生理功能
+- 疾病关联: 哪些疾病、患者群体规模、遗传学证据(如GWAS/敲除表型)
+- 动物模型和临床前验证数据
+- **必须引用UniProt API数据中的真实功能注释**
 
-- 如果API检索到了2024年后发表的PDB结构, 必须在正文中明确指出该最新结构,
-  并推荐使用它进行对接。禁止说"没有实验结构"或建议"同源建模"!
-- 如果API检索到了冷冻电镜(Cryo-EM)或X-ray晶体结构,
-  必须优先推荐它们, 而不是建议AlphaFold预测!
-- 报告的结构分析和筛选策略必须基于真实API数据, 不得凭空推理!
+## 2. 结构生物学深度分析 (800-1500字)
+- 所有已知PDB结构的详细比较(分辨率/方法/构象)
+- 结合口袋精确描述(体积/极性/柔性/可药性评分)
+- 关键残基相互作用(氢键/疏水/盐桥/π-π)
+- **如果API返回了PDB结构: 必须详细分析每个共晶配体的结合模式**
+- **如果API没返回结构: 诚实说明并讨论替代方案(同源建模需说明模板选择依据)**
 
-## 防幻觉红线(不变)
+## 3. 已知配体与构效关系 (800-1500字)
+- 已上市药物的完整信息(适应症/疗效/局限性)
+- 临床阶段候选化合物(阶段/开发机构/靶点选择性)
+- 工具化合物(用途/活性/选择性)
+- 基于ChEMBL API真实数据的SAR总结
+- 药效团模型和选择性问题
+- **必须引用ChEMBL API返回的真实IC50/Ki数据**
 
-1. 禁止捏造PDB ID! 只能填写verified_pdb_structures中已验证的!
-2. 禁止捏造配体IC50/Ki值! 只能引用chembl_activities中从ChEMBL API查询到的真实数据!
-3. 禁止捏造对接盒子XYZ坐标! 具体坐标由fetch_pdb_ligand_center()从真实PDB文件解析,
-   在docking_center_from_pdb字段中填入, 你只需在docking_box_strategy中描述策略!
-4. 禁止张冠李戴! 不将其他靶点的配体归于本靶点!
-5. 🆕 禁止跨物种借用PDB结构! 所有PDB结构的源物种必须与用户查询中的物种严格匹配!
-6. 🆕 严禁使用训练记忆中的PDB ID! (记忆隔离墙)
-   如果search_rcsb_pdb工具返回空, 你必须写"未检索到可用实验结构", 绝对禁止写"我记得有4D1P"!
-   你只能引用verified_pdb_structures中经API验证的PDB ID。如果觉得应该有但没查到,
-   写"[系统检索可能存在遗漏, 需人工复核 UniProt: XXXX]", 不能自己列出PDB编号!
-7. 🆕 禁止输出"?"或空字符串占位!
-   target_organism无法确定→填"Homo sapiens"; gene_symbol未知→从UniProt数据提取;
-   所有字段必须填具体内容, 用"?"代表未知是不可接受的!
+## 4. 研究现状与竞争格局 (500-1000字)
+- 学术研究热度(里程碑发现/历年论文趋势)
+- 工业界布局(药企/交易动态/专利分析)
+- 临床试验现状(基于ClinicalTrials.gov API数据)
+- 新技术趋势(PROTAC/分子胶/共价抑制剂/DEL)
+- 未满足的临床需求
 
-8. 禁止跨蛋白做同源建模! (同源建模处理原则)
-   如果目标是突变体(如BTK C481S)且没有直接结构, 必须优先使用同蛋白野生型高分辨率结构!
-   在筛选策略中建议"基于WT结构做in silico氨基酸突变", 不允许用其他蛋白(如C-Src)替代!
-   例如: BTK没有C481S结构→用BTK WT结构(如5P9J)做点突变, 绝不用C-Src(如3OOM)做模板!
-   所有PDB标题已通过protein_keywords过滤, 不属于目标蛋白的结构已被自动排除。
+---
+
+# 🚨 防幻觉红线(不变)
+1. PDB ID/IC50/XYZ坐标只能来自API数据, 禁止捏造
+2. API无结果→诚实写"未检索到", 禁用训练记忆
+3. 禁止跨物种/跨蛋白借用结构
+4. 所有字段禁止"?"
 """
 
 
@@ -183,6 +193,99 @@ def _http_get(url: str, timeout: int = 15) -> Optional[Dict]:
             return json.loads(r.read().decode())
     except Exception:
         return None
+
+
+def _http_get_text(url: str, timeout: int = 15) -> Optional[str]:
+    try:
+        ctx = ssl.create_default_context()
+        req = urllib.request.Request(url, headers={"User-Agent": "AutoVS-Agent/2.0"})
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  🆕 实时文献检索: PubMed + Europe PMC (免费, 无需API Key)                    ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+def search_pubmed(query: str, max_results: int = 20) -> List[Dict[str, Any]]:
+    """PubMed实时检索: 搜索文献标题+摘要。使用Entrez API, 免费。"""
+    import urllib.parse, xml.etree.ElementTree as ET
+
+    # Step 1: 搜索ID列表
+    search_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
+        f"db=pubmed&retmax={max_results}&sort=relevance&term={urllib.parse.quote(query)}"
+        "&retmode=json"
+    )
+    data = _http_get(search_url)
+    if not data:
+        return []
+    ids = data.get("esearchresult", {}).get("idlist", [])
+    if not ids:
+        return []
+
+    # Step 2: 获取摘要
+    fetch_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?"
+        f"db=pubmed&id={','.join(ids)}&retmode=xml&rettype=abstract"
+    )
+    xml_text = _http_get_text(fetch_url)
+    if not xml_text:
+        return []
+
+    # Step 3: 解析XML
+    results = []
+    try:
+        root = ET.fromstring(xml_text)
+        for article in root.findall(".//PubmedArticle"):
+            pmid = article.findtext(".//PMID", "")
+            title = article.findtext(".//ArticleTitle", "")
+            abstract = article.findtext(".//AbstractText", "") or ""
+            journal = article.findtext(".//Journal/Title", "")
+            year = article.findtext(".//Journal/JournalIssue/PubDate/Year", "")
+            doi = ""
+            for eid in article.findall(".//ELocationID"):
+                if eid.get("EIdType") == "doi":
+                    doi = eid.text or ""
+                    break
+            if title or abstract:
+                results.append({
+                    "pmid": pmid, "title": title, "abstract": abstract[:600],
+                    "journal": journal, "year": year, "doi": doi,
+                })
+    except Exception:
+        pass
+
+    return results[:max_results]
+
+
+def search_clinical_trials(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    """ClinicalTrials.gov API: 搜索临床试验。"""
+    import urllib.parse
+    url = (
+        "https://clinicaltrials.gov/api/v2/studies?"
+        f"query.term={urllib.parse.quote(query)}&pageSize={max_results}&format=json"
+    )
+    data = _http_get(url)
+    if not data:
+        return []
+    results = []
+    for study in data.get("studies", [])[:max_results]:
+        prot = study.get("protocolSection", {})
+        ident = prot.get("identificationModule", {})
+        status = prot.get("statusModule", {})
+        desc = prot.get("descriptionModule", {})
+        results.append({
+            "nct_id": ident.get("nctId", ""),
+            "title": ident.get("briefTitle", ""),
+            "status": status.get("overallStatus", ""),
+            "phase": ";".join(status.get("phaseList", []) or []),
+            "conditions": ";".join(ident.get("conditionList", []) or []),
+            "description": (desc.get("briefSummary", "") or "")[:300],
+        })
+    return results
 
 
 def fetch_chembl_activity(chembl_target_id: str) -> List[ChemblActivity]:
@@ -546,7 +649,7 @@ def scrub_report(report: Dict[str, Any]) -> Dict[str, Any]:
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class TargetScoutAgent:
-    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.2, max_tokens=4096):
+    def __init__(self, model="deepseek-reasoner", api_key=None, api_base=None, temperature=0.3, max_tokens=16384):
         self.model = model
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
@@ -581,14 +684,38 @@ class TargetScoutAgent:
         mol_type = intent.get("macromolecule_type", "Protein")
         is_nucleic = mol_type in ("RNA", "DNA")
         if gene and not is_nucleic:
-            if is_viral:
-                candidates = self._search_uniprot_global(gene)
-            elif is_pathogen or intent_organism:
-                candidates = self._search_uniprot_global(gene)  # 病原体不用人类filter
+            # 🆕 短基因符号(≤2字符)不可靠, 用query中的英文全名替代
+            search_gene = gene
+            if len(gene.strip()) <= 2:
+                # 从query中提取可能的英文全名或中文关键词翻译
+                cn_to_en = {"雄激素受体": "androgen receptor", "雌激素受体": "estrogen receptor",
+                            "糖皮质激素受体": "glucocorticoid receptor", "孕激素受体": "progesterone receptor",
+                            "雄激素": "androgen receptor", "AR受体": "androgen receptor"}
+                expanded = query
+                for cn, en in cn_to_en.items():
+                    if cn in query: expanded = en; break
+                if expanded == query and "受体" in query:
+                    expanded = query  # 无法翻译, 尝试用原query
+                search_gene = expanded
+                log.append(f"Short gene '{gene}', expanding search to '{search_gene[:60]}'")
+            # 短基因符号(≤2)或没有明确病原体信息: 强制人类organism_id:9606过滤
+            force_human = not is_viral and not is_pathogen and not intent_organism
+            if is_viral or is_pathogen:
+                candidates = self._search_uniprot_global(search_gene)
+            elif force_human or len(gene.strip()) <= 2:
+                candidates = search_uniprot_by_name(search_gene)
             else:
-                candidates = search_uniprot_by_name(gene)
+                candidates = search_uniprot_by_name(search_gene)
             if candidates:
                 best = candidates[0]
+                # 🆕 验证: 如果搜到的基因名和意图解析的基因不匹配, 再试长名称
+                found_gene = (best.get("gene") or "").upper()
+                if found_gene and gene.upper() not in ("", "AR", found_gene) and len(gene) <= 2:
+                    # 短基因符号可能匹配错误, 用全名重搜
+                    fallback = search_uniprot_by_name(query if len(query) > 10 else f"{query} receptor")
+                    if fallback and (fallback[0].get("gene") or "").upper() == gene.upper():
+                        best = fallback[0]
+                        log.append(f"Fallback search corrected: {best.get('gene')}")
                 uniprot_id = best.get("uniprot_id", "")
                 gene_symbol = best.get("gene") or gene
                 uniprot_data = verify_uniprot_id(uniprot_id) if uniprot_id else None
@@ -778,7 +905,18 @@ class TargetScoutAgent:
                     log.append(f"PDB ligand center({recommended_pdb}): {docking_center}")
                     api_sources.append(f"PDB_ligand_center:{recommended_pdb}")
 
-        # ── Step 4: ChEMBL搜索 + 🆕 真实活性数据 ──
+        # ── Step 4: 🆕 实时文献检索 ──
+        search_query = f"{gene_symbol or gene} inhibitor drug discovery"
+        pubmed_papers = search_pubmed(search_query)
+        clinical_trials = search_clinical_trials(gene_symbol or gene)
+        if pubmed_papers:
+            api_sources.append(f"PubMed:{len(pubmed_papers)}_papers")
+            log.append(f"PubMed: {len(pubmed_papers)} papers for '{search_query}'")
+        if clinical_trials:
+            api_sources.append(f"ClinicalTrials:{len(clinical_trials)}_trials")
+            log.append(f"ClinicalTrials: {len(clinical_trials)} trials")
+
+        # ── Step 5: ChEMBL搜索 + 真实活性数据 ──
         chembl_activities = []
         chembl_results = search_chembl_target(gene_symbol or gene)
         for cr in chembl_results[:2]:
@@ -790,8 +928,9 @@ class TargetScoutAgent:
                     log.append(f"ChEMBL {cid}: {len(acts)} activities fetched")
                     api_sources.append(f"ChEMBL_activity:{cid}")
 
-        # ── Step 5: 🆕 将真实工具数据注入Prompt ──
-        tool_data_text = self._format_tool_data(recommended_pdb, docking_center, verified_pdbs, chembl_activities)
+        # ── Step 5: 🆕 将所有真实数据注入Prompt ──
+        tool_data_text = self._format_tool_data(recommended_pdb, docking_center, verified_pdbs,
+                                                 chembl_activities, pubmed_papers, clinical_trials)
         user_prompt = self._build_prompt(query, gene_symbol or gene, uniprot_id, uniprot_data,
                                           verified_pdbs, recommended_pdb, docking_center,
                                           chembl_activities, tool_data_text,
@@ -822,7 +961,8 @@ class TargetScoutAgent:
     # 工具数据格式化 (注入Prompt)
     # =========================================================================
 
-    def _format_tool_data(self, recommended_pdb, docking_center, verified_pdbs, chembl_activities):
+    def _format_tool_data(self, recommended_pdb, docking_center, verified_pdbs,
+                           chembl_activities, pubmed_papers, clinical_trials):
         lines = ["## 🛠️ 真实工具检索数据 (优先级高于历史知识!)"]
         if verified_pdbs:
             lines.append(f"\n### 已验证PDB结构 ({len(verified_pdbs)}个, 最新优先)")
@@ -842,12 +982,23 @@ class TargetScoutAgent:
             for a in chembl_activities[:10]:
                 lines.append(f"- {a.get('molecule_chembl_id','?')}: "
                            f"{a.get('standard_type','?')}={a.get('standard_value','?')} {a.get('standard_units','nM')}")
-            # 取最有效的作为参考
             best = chembl_activities[0]
             lines.append(f"\n**最有效配体**: {best.get('molecule_chembl_id','?')} "
                         f"({best.get('standard_type','?')}={best.get('standard_value','?')} {best.get('standard_units','nM')})")
         else:
             lines.append("\n### ChEMBL: 未找到活性数据")
+
+        if pubmed_papers:
+            lines.append(f"\n### 📚 PubMed实时文献 ({len(pubmed_papers)}篇)")
+            for p in pubmed_papers[:12]:
+                lines.append(f"- [{p.get('pmid','?')}] {p.get('title','?')[:120]} ({p.get('year','?')})")
+                if p.get('abstract'):
+                    lines.append(f"  摘要: {p.get('abstract','?')[:300]}...")
+
+        if clinical_trials:
+            lines.append(f"\n### 🏥 ClinicalTrials.gov ({len(clinical_trials)}项)")
+            for t in clinical_trials[:8]:
+                lines.append(f"- {t.get('nct_id','?')}: {t.get('title','?')[:100]} [{t.get('phase','?')}/{t.get('status','?')}]")
 
         return "\n".join(lines)
 
@@ -859,40 +1010,54 @@ class TargetScoutAgent:
             parts.append(f"### UniProt数据\n蛋白: {uniprot_data.get('protein_name','?')}\n功能: {uniprot_data.get('function','?')[:600]}")
         parts.append(tool_data_text)
         parts.append("""### 任务
-生成TargetResearchReport JSON。记住:
-- 如果工具数据中有2024年后的PDB结构, structural_analysis必须推荐它, 禁止说"没有结构"!
-- 如果工具数据中有ChEMBL活性数据, 在known_ligands_text中引用具体数值
-- 禁止捏造PDB ID/IC50值/XYZ坐标!
-- 推荐对接PDB: {rec_pdb}, 对接盒子中心(来自PDB文件): {center}""".format(
+生成纯调研报告JSON。⚠️ 不要生成筛选策略或漏斗设计(下游StrategyGenerator负责)!
+- 每个文本字段至少800字
+- 如果工具数据中有ChEMBL活性数据, 必须在known_ligands_text中详细引用SAR
+- 如果工具数据中有PDB结构, 必须在structural_analysis中逐一分析共晶配体结合模式
+- 必须包含: 已上市药物/临床候选化合物/研究现状/竞争格局
+- 禁止捏造任何数值! 不确定的信息标注"待实验验证" """.format(
             rec_pdb=recommended_pdb or "无",
             center=docking_center if docking_center else "无配体可解析",
         ))
         return "\n\n".join(parts)
 
     def _call_llm_for_report(self, user_prompt: str) -> Dict[str, Any]:
-        schema = {"type":"object","required":["target_name"],"properties":{
+        schema = {"type":"object","required":["target_name","biology_overview","structural_analysis","druggability_assessment"],"properties":{
             "target_name":{"type":"string"},"biology_overview":{"type":"string"},
             "structural_analysis":{"type":"string"},"druggability_assessment":{"type":"string"},
-            "screening_strategy":{"type":"string"},"known_ligands_text":{"type":"string"},
+            "known_ligands_text":{"type":"string"},
             "references":{"type":"array","items":{"type":"string"}},
             "binding_site":{"type":"object","properties":{
                 "pocket_type":{"type":"string"},"pocket_description":{"type":"string"},
                 "key_residues_text":{"type":"string"},"docking_box_strategy":{"type":"string"},
                 "structural_flexibility":{"type":"string"}}}}}
         raw = ""
+        # 🆕 reasoner不支持response_format/temperature, 用prompt约束
+        is_reasoner = "reasoner" in self.model.lower()
+        kwargs = dict(model=self.model, max_tokens=self.max_tokens,
+                      messages=[{"role":"system","content":SCOUT_SYSTEM_PROMPT},
+                                {"role":"user","content":user_prompt},
+                                {"role":"system","content":f"严格输出合法JSON(所有字符串中的换行用\\n转义, 引号用\\\"转义):\n{json.dumps(schema,indent=2,ensure_ascii=False)}"}])
+        if not is_reasoner:
+            kwargs["temperature"] = self.temperature
+            kwargs["response_format"] = {"type":"json_object"}
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model, temperature=self.temperature, max_tokens=self.max_tokens,
-                messages=[{"role":"system","content":SCOUT_SYSTEM_PROMPT},
-                          {"role":"user","content":user_prompt},
-                          {"role":"system","content":f"严格输出合法JSON(所有字符串中的换行用\\n转义, 引号用\\\"转义):\n{json.dumps(schema,indent=2,ensure_ascii=False)}"}],
-                response_format={"type":"json_object"},
-            )
-            raw = resp.choices[0].message.content.strip()
+            resp = self.client.chat.completions.create(**kwargs)
+            # 🆕 reasoner可能把JSON放在reasoning_content末尾
+            raw = resp.choices[0].message.content
+            if not raw or not raw.strip():
+                reasoning = getattr(resp.choices[0].message, "reasoning_content", "") or ""
+                if reasoning:
+                    # 从推理过程末尾提取JSON
+                    import re as _re2
+                    m = _re2.search(r'\{[^{}]*"target_name"[^{}]*\}', reasoning[::-1])
+                    if m:
+                        raw = m.group()[::-1]
+            raw = (raw or "").strip()
             # 多层JSON修复
             parsed = self._robust_json_parse(raw)
             report = TargetResearchReport.model_validate(parsed).model_dump()
-            sections = [report.get(k,"") for k in ["biology_overview","structural_analysis","druggability_assessment","screening_strategy"]]
+            sections = [report.get(k,"") for k in ["biology_overview","structural_analysis","druggability_assessment","known_ligands_text"]]
             report["full_report_text"] = "\n\n".join(s for s in sections if s)
             report = scrub_report(report)  # 🆕 清洗走私坐标
             return report
@@ -956,30 +1121,31 @@ class TargetScoutAgent:
     # =========================================================================
 
     def _parse_intent(self, query: str) -> Dict[str, Any]:
+        is_reasoner = "reasoner" in self.model.lower()
+        kwargs = dict(model=self.model, max_tokens=512,
+                      messages=[{"role":"system","content":(
+                          "提取靶点标识。中文靶点翻译英文: 雄激素受体→AR, 雌激素受体→ESR1。"
+                          "输出JSON: {\"target_name\":\"基因符号\",\"organism\":\"物种\",\"is_pathogen\":false,\"macromolecule_type\":\"Protein\"}"
+                      )},
+                      {"role":"user","content":f"查询: {query}"}])
+        if not is_reasoner:
+            kwargs["temperature"] = 0.0
+            kwargs["response_format"] = {"type":"json_object"}
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model, temperature=0.0, max_tokens=512,
-                messages=[{"role":"system","content":(
-                    "提取靶点标识和物种。规则: "
-                    "- 人类靶点→HUGO基因符号, organism=Homo sapiens "
-                    "- 病毒靶点→病毒名+蛋白名, organism=病毒学名 "
-                    "- 寄生虫/细菌→学名+蛋白名, organism=拉丁学名 "
-                    "- RNA/DNA靶点→macromolecule_type=RNA或DNA, organism=物种 "
-                    "- 示例: HIV-1 TAR RNA→target_name=HIV-1 TAR RNA, macromolecule_type=RNA "
-                    "- 输出JSON: {\"target_name\":\"ID\",\"organism\":\"物种\",\"is_pathogen\":false,\"macromolecule_type\":\"Protein\"}"
-                )},
-                          {"role":"user","content":f"查询: {query}"},
-                          {"role":"system","content":'输出JSON: {"target_name":"靶点ID","organism":"物种学名","is_pathogen":false}'}],
-                response_format={"type":"json_object"},
-            )
-            parsed = json.loads(resp.choices[0].message.content.strip())
+            resp = self.client.chat.completions.create(**kwargs)
+            raw = resp.choices[0].message.content
+            if not raw or not raw.strip():
+                raw = getattr(resp.choices[0].message, "reasoning_content", "") or ""
+                # 从推理末尾提取JSON
+                if "{" in raw:
+                    raw = raw[raw.rfind("{"):]
+            parsed = json.loads(raw.strip())
             if "properties" in parsed and "target_name" not in parsed:
-                resp2 = self.client.chat.completions.create(
-                    model=self.model, temperature=0.0, max_tokens=256,
-                    messages=[{"role":"user","content":f"提取靶点(json): {query}"},
-                              {"role":"system","content":'输出JSON: {"target_name":"靶点名"}'}],
-                    response_format={"type":"json_object"},
-                )
+                kwargs2 = dict(model=self.model, max_tokens=256,
+                               messages=[{"role":"user","content":f"提取靶点(json): {query}"},
+                                         {"role":"system","content":'输出JSON: {"target_name":"靶点名"}'}])
+                if not is_reasoner: kwargs2.update(temperature=0.0, response_format={"type":"json_object"})
+                resp2 = self.client.chat.completions.create(**kwargs2)
                 parsed = json.loads(resp2.choices[0].message.content.strip())
             return parsed
         except Exception:

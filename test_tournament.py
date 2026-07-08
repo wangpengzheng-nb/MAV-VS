@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║            👇 只需改这一行! 👇                                  ║
 # ╚══════════════════════════════════════════════════════════════════╝
-YOUR_QUERY = "我想找个能极速止痛的分子，目标是 Nav1.7 (钠离子通道)"
+YOUR_QUERY = "针对 STAT3 这个转录因子，单纯的抑制剂效果太差了，经常耐药，筛选出来一个不会经常耐药的药物"
 # ╔══════════════════════════════════════════════════════════════════╝
 
 SEP = "=" * 70
@@ -45,8 +45,8 @@ def run_test():
     print(f"\n  {'─'*60}")
     print(f"  📋 靶点深度调研报告")
     print(f"  {'─'*60}")
-    print(f"  靶点: {report.get('target_name','?')} | 基因: {report.get('gene_name','?')} | UniProt: {report.get('uniprot_id','?')}")
-    print(f"  类型: {report.get('target_class','?')} | 物种: {report.get('organism','?')}")
+    print(f"  靶点: {report.get('target_name','?')} | 基因: {report.get('gene_symbol','?')} | UniProt: {report.get('uniprot_id','?')}")
+    print(f"  类型: {report.get('target_macromolecule_type','?')} | 物种: {report.get('target_organism','?')}")
     bs = report.get('binding_site', {})
     print(f"  口袋: {bs.get('pocket_description','?')}")
     print(f"  体积: {bs.get('volume_angstrom3','?')} | 极性: {bs.get('polarity','?')} | 柔性: {bs.get('flexibility','?')}")
@@ -72,8 +72,8 @@ def run_test():
     report_file = os.path.join(out_dir, f"research_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
     with open(report_file, "w", encoding="utf-8") as f:
         f.write(f"# 靶点深度调研报告: {report.get('target_name','?')}\n\n")
-        f.write(f"**基因**: {report.get('gene_name','?')} | **UniProt**: {report.get('uniprot_id','?')}\n")
-        f.write(f"**类型**: {report.get('target_class','?')} | **物种**: {report.get('organism','?')}\n\n")
+        f.write(f"**基因**: {report.get('gene_symbol','?')} | **UniProt**: {report.get('uniprot_id','?')}\n")
+        f.write(f"**类型**: {report.get('target_macromolecule_type','?')} | **物种**: {report.get('target_organism','?')}\n\n")
         f.write(f"## 结合位点\n- 口袋: {bs.get('pocket_description','?')}\n")
         f.write(f"- 对接盒子: center={bs.get('center_coordinates',[])}, size={bs.get('suggested_box_size',[])}\n\n")
         if ligands:
