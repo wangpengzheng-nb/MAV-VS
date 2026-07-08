@@ -1,277 +1,179 @@
 #!/usr/bin/env python3
 """
-AutoVS-Agent v2.0 锦标赛机制验证脚本
-=====================================
-模拟 KRAS G12D switch-II 隐蔽口袋的共价抑制剂虚拟筛选方案设计,
-流式打印每个节点的状态变化, 重点展示:
-  1. candidate_strategies 的内容
-  2. 红军专家的互相攻击对话
-  3. 裁判的打分和 Elo 排名
+AutoVS-Agent v2.0 完整锦标赛验证
+=================================
+用法: python test_tournament.py
+
+流程:
+  YOUR_QUERY → 深度调研报告(2000字) → 5-10个详细策略 → 红军三人设辩论 → Elo排名
 """
-
 from __future__ import annotations
-
-import json
-import os
-import sys
+import os, sys
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-# 项目根目录
+# 加载 .env 中的 DEEPSEEK_API_KEY
+from dotenv import load_dotenv
+load_dotenv()
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-
-# =============================================================================
-# 模拟输入: KRAS G12D
-# =============================================================================
-
-KRAS_G12D_TARGET = {
-    "target_name": "KRAS G12D",
-    "uniprot_id": "P01116",
-    "pdb_id": "6GOD",
-    "pdb_path": "",
-    "binding_site_center": [0.0, 0.0, 0.0],
-    "binding_site_size": [20.0, 20.0, 20.0],
-    "key_residues": ["ASP12", "GLY60", "LYS117"],
-    "target_class": "PPI",
-    "description": (
-        "KRAS 是最常见的致癌基因之一。G12D 突变 (Gly→Asp) 破坏了 GTPase 活性, "
-        "使 KRAS 锁定在 GTP-bound 活性构象。Switch-II 区域含有一个可被诱导的隐蔽口袋 "
-        "(cryptic pocket), 是共价抑制剂的关键结合位点。"
-        "目标: 设计针对 G12D 突变半胱氨酸(需引入)或 switch-II 口袋的共价虚拟筛选方案。"
-    ),
-    "organism": "Homo sapiens",
-}
-
-
-# =============================================================================
-# 美化打印函数
-# =============================================================================
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║            👇 只需改这一行! 👇                                  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+YOUR_QUERY = "寻找针对GID4的配体"
+# ╔══════════════════════════════════════════════════════════════════╝
 
 SEP = "=" * 70
-SEP2 = "-" * 70
 
-def print_header(text: str) -> None:
-    print(f"\n{SEP}")
-    print(f"  {text}")
-    print(SEP)
+def hdr(t): print(f"\n{SEP}\n  {t}\n{SEP}")
 
-def print_strategy(s: dict, idx: int) -> None:
-    print(f"\n  📋 策略 {idx}: {s.get('strategy_name', '?')}")
-    print(f"     🏷️  {s.get('strategy_tagline', '')}")
-    print(f"     📐 方法: {s.get('approach_type', '?')}")
-    print(f"     📊 存活率: {s.get('estimated_survival_rate', '?')}")
-    print(f"     💡 {s.get('rationale', '')[:200]}...")
-    af = s.get("absolute_filters", [])
-    if af:
-        print(f"     🔴 绝对过滤 ({len(af)}条):")
-        for f in af:
-            print(f"        - [{f.get('rule_id','?')}] {f.get('description','?')[:80]}")
-    rr = s.get("relative_rankings", [])
-    if rr:
-        print(f"     🟡 相对排序 ({len(rr)}条):")
-        for f in rr:
-            print(f"        - [{f.get('rule_id','?')}] {f.get('description','?')[:80]}")
-    cp = s.get("contingency_plan", {})
-    if cp:
-        print(f"     🟢 应急预案: {cp.get('trigger_condition', '?')}")
-        steps = cp.get("relaxation_steps", [])
-        for st in steps:
-            print(f"        ↳ {st.get('rule_id','?')} → {st.get('new_value','?')} ({st.get('reason','')[:60]})")
-    print(f"     ✅ 优势: {', '.join(s.get('strengths', [])[:3])}")
-    print(f"     ⚠️  劣势: {', '.join(s.get('weaknesses', [])[:3])}")
+def run_test():
+    use_llm = bool(os.getenv("DEEPSEEK_API_KEY"))
+    hdr(f"AutoVS-Agent v2.0 — {'LLM模式' if use_llm else '降级模式(设DEEPSEEK_API_KEY启用LLM)'}")
+    print(f"  💬 查询: {YOUR_QUERY}")
 
-def print_attack(atk: dict) -> None:
-    sev_icon = {"critical": "🔴", "major": "🟠", "minor": "🟡"}.get(atk.get("severity", ""), "⚪")
-    print(f"     {sev_icon} [{atk.get('persona_name', '?')}] 严重度={atk.get('severity','?')} | 认可度={atk.get('agreement_with_strategy', 0):.0%}")
-    for p in atk.get("attack_points", []):
-        print(f"        💢 {p}")
-    for f in atk.get("suggested_fixes", []):
-        print(f"        💊 建议: {f}")
+    # ═══════════ Step 1: 深度调研 ═══════════
+    hdr("Step 1: 深度调研 (TargetScout)")
+    from src.agents.target_scout import TargetScoutAgent
+    scout = TargetScoutAgent()
+    report = scout.deep_research(YOUR_QUERY)
+    for entry in report.get("_search_log", []):
+        print(f"  {entry}")
 
-def print_debate(record: dict) -> None:
-    print(f"\n  ⚔️  Round: {record.get('round_id', '?')}")
-    print(f"     {record.get('strategy_a', '?')} vs {record.get('strategy_b', '?')}")
-    print(f"\n     📢 红军对 {record.get('strategy_a', '?')} 的攻击:")
-    for atk in record.get("expert_attacks_on_a", []):
-        print_attack(atk)
-    print(f"\n     📢 红军对 {record.get('strategy_b', '?')} 的攻击:")
-    for atk in record.get("expert_attacks_on_b", []):
-        print_attack(atk)
-    print(f"\n     ⚖️  裁判裁决:")
-    print(f"        {record.get('judge_summary', '')[:300]}")
-    print(f"     🏆 胜者: {record.get('winner', 'tie')}")
-    print(f"     🎯 决定因素: {record.get('key_deciding_factor', '')[:150]}")
+    # ── 打印完整报告 ──
+    print(f"\n  {'─'*60}")
+    print(f"  📋 靶点深度调研报告")
+    print(f"  {'─'*60}")
+    print(f"  靶点: {report.get('target_name','?')} | 基因: {report.get('gene_name','?')} | UniProt: {report.get('uniprot_id','?')}")
+    print(f"  类型: {report.get('target_class','?')} | 物种: {report.get('organism','?')}")
+    bs = report.get('binding_site', {})
+    print(f"  口袋: {bs.get('pocket_description','?')}")
+    print(f"  体积: {bs.get('volume_angstrom3','?')} | 极性: {bs.get('polarity','?')} | 柔性: {bs.get('flexibility','?')}")
+    print(f"  对接盒子: center={bs.get('center_coordinates',[])}, size={bs.get('suggested_box_size',[])}")
+    residues = [f"{r.get('name','?')}({r.get('role','?')})" for r in bs.get('key_residues',[])]
+    print(f"  关键残基: {', '.join(residues) if residues else '无'}")
 
+    ligands = report.get('known_ligands', [])
+    if ligands:
+        print(f"\n  已知配体 ({len(ligands)}个):")
+        for l in ligands[:8]:
+            print(f"    • {l.get('name','?')}: {l.get('activity_type','?')}={l.get('activity_value','?')} [{l.get('mechanism','?')}]")
 
-# =============================================================================
-# 主测试: 流式运行 + 美化打印 (纯本地, 不调用 LLM)
-# =============================================================================
+    refs = report.get('references', [])
+    if refs:
+        print(f"\n  参考文献:")
+        for r in refs[:8]:
+            print(f"    • {r}")
 
-def run_test() -> None:
-    """运行锦标赛验证 (使用降级/启发式逻辑, 不依赖 LLM API)。"""
-    print_header("AutoVS-Agent v2.0 锦标赛验证")
-    print(f"  🎯 测试靶点: KRAS G12D")
-    print(f"  📅 开始时间: {datetime.now().isoformat()}")
-    print(f"  ⚠️  本测试使用降级/启发式逻辑 (不调用LLM), 仅验证架构和数据流")
-    print(f"  提示: 设置 DEEPSEEK_API_KEY 环境变量可启用真实LLM调用")
+    # ── 保存调研报告 md ──
+    out_dir = os.path.join(os.path.dirname(__file__), "分析文件")
+    os.makedirs(out_dir, exist_ok=True)
+    report_file = os.path.join(out_dir, f"research_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+    with open(report_file, "w", encoding="utf-8") as f:
+        f.write(f"# 靶点深度调研报告: {report.get('target_name','?')}\n\n")
+        f.write(f"**基因**: {report.get('gene_name','?')} | **UniProt**: {report.get('uniprot_id','?')}\n")
+        f.write(f"**类型**: {report.get('target_class','?')} | **物种**: {report.get('organism','?')}\n\n")
+        f.write(f"## 结合位点\n- 口袋: {bs.get('pocket_description','?')}\n")
+        f.write(f"- 对接盒子: center={bs.get('center_coordinates',[])}, size={bs.get('suggested_box_size',[])}\n\n")
+        if ligands:
+            f.write("## 已知配体\n")
+            for l in ligands: f.write(f"- {l.get('name','?')}: {l.get('activity_type','?')}={l.get('activity_value','?')}\n")
+            f.write("\n")
+        full_text = report.get('full_report_text', '')
+        f.write(full_text)
+        f.write("\n\n## 参考文献\n")
+        for r in refs: f.write(f"- {r}\n")
+    print(f"  📁 调研报告已保存: {report_file}")
 
-    # ---- Step 1: 模拟 Target Scout ----
-    print_header("Step 1: Target Scout — 靶点侦察")
-    target_profile = {
-        "target_name": "KRAS G12D",
-        "structural_assessment": {
-            "has_experimental_structure": True,
-            "pdb_ids": ["6GOD", "4EPT", "6N2K"],
-            "resolution_range": "1.5-2.2A",
-            "has_cocrystal_with_ligand": True,
-            "pocket_type": "cryptic",
-            "pocket_volume_estimate": "medium (300-800 A3)",
-            "pocket_polarity": "mixed",
-            "flexibility_concern": "highly_flexible",
-        },
-        "known_ligand_info": {
-            "has_known_active_ligands": True,
-            "representative_ligands": ["ARS-1620", "MRTX849 (Adagrasib)", "AMG 510 (Sotorasib)"],
-            "binding_affinity_range": "nM",
-            "key_pharmacophore_features": ["共价弹头(丙烯酰胺)", "switch-II口袋占据", "疏水芳环"],
-            "relevant_patents_or_papers": ["DOI:10.1038/s41586-019-1494-7"],
-        },
-        "priority_metrics": {
-            "primary_metrics": ["共价弹头与G12D半胱氨酸的反应性", "switch-II口袋疏水互补面积", "对接能量(诱导契合后)"],
-            "secondary_metrics": ["选择性vs KRAS WT", "细胞渗透性"],
-            "red_flags": ["PAINS子结构", "非特异性共价弹头(如醛类)", "hERG抑制风险"],
-            "suggested_thresholds": {"MW": "<800 (共价抑制剂可适当放宽)", "LogP": "2-6"},
-        },
-        "drug_design_challenges": [
-            "switch-II口袋在apo状态下不可见, 需要诱导契合",
-            "G12D突变引入的天冬氨酸改变了电荷分布",
-            "GDP/GTP的皮摩尔级亲和力使得竞争极其困难",
-            "KRAS表面极度光滑, 缺乏传统小分子结合口袋",
-        ],
-        "recommended_approaches": ["covalent", "SBDD", "FBDD"],
-        "key_references": ["DOI:10.1038/s41586-019-1494-7", "DOI:10.1021/acs.jmedchem.0c00246"],
-        "profile_timestamp": datetime.now().isoformat(),
-    }
-    print(f"  ✅ 靶点画像已生成")
-    print(f"     口袋类型: {target_profile['structural_assessment']['pocket_type']}")
-    print(f"     已知配体: {target_profile['known_ligand_info']['representative_ligands']}")
-    print(f"     推荐路线: {target_profile['recommended_approaches']}")
-
-    # ---- Step 2: 模拟 Strategy Generation ----
-    print_header("Step 2: Strategy Generation — 多策略生成")
+    # ═══════════ Step 2: 策略生成 ═══════════
+    hdr("Step 2: 详细策略生成 (StrategyGenerator)")
     from src.agents.strategy_generator import StrategyGeneratorAgent
-    agent = StrategyGeneratorAgent()
-    result = agent.generate_strategies(target_profile, KRAS_G12D_TARGET)
+    gen = StrategyGeneratorAgent()
+    result = gen.generate_strategies(report)
     strategies = result["strategies"]
-    print(f"  ✅ {len(strategies)} 个差异化策略已生成")
-    print(f"  💡 生成理由: {result.get('generation_rationale', '')[:200]}...")
-
+    print(f"  ✅ {len(strategies)} 个策略: {result.get('generation_rationale','')[:150]}")
     for i, s in enumerate(strategies, 1):
-        print_strategy(s, i)
+        steps = s.get("pipeline_steps", [])
+        print(f"\n  📋 {i}. {s['strategy_name']} [{s['approach_type']}]")
+        print(f"     🏷️  {s['strategy_tagline']}")
+        print(f"     💡 {s['rationale'][:120]}...")
+        print(f"     📊 {s.get('survival_estimate','?')} | ⏱️ {s.get('estimated_runtime','?')}")
+        print(f"     📝 步骤 ({len(steps)}步):")
+        for st in steps:
+            print(f"        {st.get('step_number','?')}. {st.get('step_name','?')} [{st.get('tool','?')}]")
+            print(f"           → {st.get('metric','?')}: {st.get('threshold','?')}")
+        print(f"     🟢 应急: {s.get('contingency','')[:80]}...")
+        print(f"     ✅ {', '.join(s.get('strengths',[])[:2])}")
+        print(f"     ⚠️  {', '.join(s.get('weaknesses',[])[:2])}")
 
-    # ---- Step 3/4: 模拟锦标赛 ----
-    print_header("Step 3-4: 红军辩论锦标赛")
+    # ── 每个策略保存为独立 md ──
+    strat_dir = os.path.join(os.path.dirname(__file__), "分析文件", "strategies")
+    os.makedirs(strat_dir, exist_ok=True)
+    for i, s in enumerate(strategies, 1):
+        sf = os.path.join(strat_dir, f"strategy_{i:02d}_{s['strategy_name']}.md")
+        with open(sf, "w", encoding="utf-8") as f:
+            f.write(f"# 策略 {i}: {s['strategy_name']}\n\n")
+            f.write(f"**标签**: {s.get('strategy_tagline','')}\n\n")
+            f.write(f"**方法**: {s.get('approach_type','?')} | **估算耗时**: {s.get('estimated_runtime','?')}\n\n")
+            f.write(f"## 原理\n{s.get('rationale','')}\n\n")
+            f.write(f"## 步骤\n")
+            for st in s.get("pipeline_steps", []):
+                f.write(f"### Step {st.get('step_number','?')}: {st.get('step_name','?')}\n")
+                f.write(f"- **工具**: {st.get('tool','?')}\n")
+                f.write(f"- **操作**: {st.get('action','?')}\n")
+                f.write(f"- **指标**: {st.get('metric','?')}\n")
+                f.write(f"- **阈值**: {st.get('threshold','?')}\n")
+                f.write(f"- **理由**: {st.get('rationale','?')}\n\n")
+            f.write(f"## 存活估算\n{s.get('survival_estimate','?')}\n\n")
+            f.write(f"## 应急预案\n{s.get('contingency','?')}\n\n")
+            f.write(f"## 优势\n" + "\n".join(f"- {x}" for x in s.get('strengths',[])) + "\n\n")
+            f.write(f"## 劣势\n" + "\n".join(f"- {x}" for x in s.get('weaknesses',[])) + "\n\n")
+            f.write(f"## 适用场景\n{s.get('suitable_when','?')}\n")
+    print(f"  📁 {len(strategies)}个策略已保存: {strat_dir}/")
 
-    # 初始化 Elo
-    elo_ratings = {s["strategy_name"]: 1500.0 for s in strategies}
-    pairings = []
-    for i in range(len(strategies)):
-        for j in range(i + 1, len(strategies)):
-            pairings.append([strategies[i]["strategy_name"], strategies[j]["strategy_name"]])
+    # ═══════════ Step 3: 红军辩论 ═══════════
+    hdr("Step 3: 红军三人设辩论")
+    from src.agents.expert_committee import RedTeamReviewer
+    from src.agents.judge_agent import StrategyJudge
 
-    print(f"  🏟️  参赛策略: {len(strategies)} 个")
-    print(f"  ⚔️  辩论场次: {len(pairings)} 场")
-    print(f"  📊 初始 Elo: 全部 1500.0")
+    elo = {s["strategy_name"]: 1500.0 for s in strategies}
+    pairings = [[strategies[i]["strategy_name"], strategies[j]["strategy_name"]]
+                for i in range(len(strategies)) for j in range(i+1, len(strategies))]
+    print(f"  🏟️  {len(strategies)}策略 × {len(pairings)}场 = 每场3位专家评审")
 
-    tournament_history = []
+    reviewer = RedTeamReviewer()
+    judge = StrategyJudge()
 
-    for round_num, (name_a, name_b) in enumerate(pairings, 1):
-        sa = {s["strategy_name"]: s for s in strategies}[name_a]
-        sb = {s["strategy_name"]: s for s in strategies}[name_b]
+    for rn, (na, nb) in enumerate(pairings[:min(len(pairings), 10)], 1):
+        sm = {s["strategy_name"]: s for s in strategies}
+        sa, sb = sm[na], sm[nb]
+        debate = reviewer.debate_strategies(sa, sb, report)
+        verdict = judge.judge_debate(sa, sb, debate["attacks_on_a"], debate["attacks_on_b"], report)
 
-        # 红军评审
-        from src.agents.expert_committee import RedTeamReviewer
-        reviewer = RedTeamReviewer()
-        debate_result = reviewer.debate_strategies(sa, sb, target_profile)
-
-        # 裁判
-        from src.agents.judge_agent import StrategyJudge
-        judge = StrategyJudge()
-        verdict = judge.judge_debate(
-            sa, sb,
-            debate_result["attacks_on_a"],
-            debate_result["attacks_on_b"],
-            target_profile,
-        )
-
-        # Elo
         winner = verdict.get("winner", "")
         if winner and winner != "tie":
-            loser = name_b if winner == name_a else name_a
-            from src.agents.judge_agent import StrategyJudge as SJ
-            gain, loss = SJ.update_elo(elo_ratings, winner, loser, 32.0)
-            elo_ratings[winner] += gain
-            elo_ratings[loser] -= loss
+            loser = nb if winner == na else na
+            g, _ = StrategyJudge.update_elo(elo, winner, loser, 32.0)
+            elo[winner] += g; elo[loser] -= g
 
-        record = {
-            "round_id": f"round_{round_num}",
-            "strategy_a": name_a,
-            "strategy_b": name_b,
-            "expert_attacks_on_a": debate_result["attacks_on_a"],
-            "expert_attacks_on_b": debate_result["attacks_on_b"],
-            "judge_summary": verdict.get("judge_commentary", ""),
-            "winner": winner,
-            "key_deciding_factor": verdict.get("key_deciding_factor", ""),
-            "timestamp": datetime.now().isoformat(),
-        }
-        tournament_history.append(record)
-        print_debate(record)
+        print(f"\n  ⚔️  Round {rn}: {na[:30]} vs {nb[:30]}")
+        for atk in debate["attacks_on_a"][:1]:
+            pts = atk.get("attack_points", [])
+            ref = atk.get("reference_to_report", "")
+            print(f"     [{atk['persona_name']}] {atk['focus_area']} — 认可度={atk['agreement']:.0%}")
+            if pts: print(f"        💢 {pts[0][:100]}")
+            if ref: print(f"        📎 引用: {ref[:80]}")
+        print(f"     ⚖️  裁判: {verdict.get('judge_commentary','?')[:150]}")
+        print(f"     🏆 {winner or 'tie'} (A={verdict.get('strategy_a_score','?')}, B={verdict.get('strategy_b_score','?')})")
 
-    # ---- 排名 ----
-    print_header("🏆 最终 Elo 排名")
-    ranked = sorted(elo_ratings.items(), key=lambda x: x[1], reverse=True)
-    for rank, (name, elo_score) in enumerate(ranked, 1):
-        medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else "  "
+    # ═══════════ 排名 ═══════════
+    hdr("🏆 最终排名")
+    for rank, (name, esc) in enumerate(sorted(elo.items(), key=lambda x: x[1], reverse=True), 1):
+        m = "🥇" if rank==1 else "🥈" if rank==2 else "🥉" if rank==3 else "  "
         s = {s["strategy_name"]: s for s in strategies}[name]
-        print(f"  {medal} {rank}. {name}  Elo={elo_score:.0f}  [{s.get('approach_type','?')}]")
-        print(f"      {s.get('strategy_tagline', '')}")
-
-    # ---- MetaReview ----
-    print_header("Step 5: MetaReview — 最佳策略进化")
-    best_name = ranked[0][0]
-    best_strategy = {s["strategy_name"]: s for s in strategies}[best_name]
-
-    # 收集建议
-    all_suggestions = []
-    for debate in tournament_history:
-        for atk_list in [debate["expert_attacks_on_a"], debate["expert_attacks_on_b"]]:
-            for atk in atk_list:
-                all_suggestions.extend(atk.get("suggested_fixes", []))
-    unique_suggestions = list(dict.fromkeys(all_suggestions))[:10]
-
-    print(f"  🏆 最佳策略: {best_name}")
-    print(f"  📊 最终 Elo: {elo_ratings[best_name]:.0f}")
-    print(f"  💊 进化建议 ({len(unique_suggestions)}条):")
-    for sug in unique_suggestions:
-        print(f"     - {sug}")
-
-    print(f"\n{SEP}")
-    print(f"  ✅ 锦标赛验证完成!")
-    print(f"  📊 总结: {len(strategies)}策略 × {len(pairings)}场辩论 → 最佳策略: {best_name}")
-    print(SEP)
-
-    return {
-        "strategies": strategies,
-        "history": tournament_history,
-        "elo": elo_ratings,
-        "best": best_strategy,
-    }
-
-
-# =============================================================================
-# 入口
-# =============================================================================
+        print(f"  {m} {rank}. {name}  Elo={esc:.0f}  {s.get('strategy_tagline','')[:60]}")
+    print(f"\n{SEP}\n  ✅ 完成! {len(strategies)}策略 × {len(pairings)}辩论 → 🏆 {max(elo.items(),key=lambda x:x[1])[0]}\n{SEP}")
 
 if __name__ == "__main__":
-    result = run_test()
+    run_test()

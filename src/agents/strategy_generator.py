@@ -1,190 +1,84 @@
 """
-AutoVS-Agent v2.0: Strategy Generator (策略生成器)
-===================================================
-职责: 基于 TargetProfile 生成 3-5 个差异化的虚拟筛选策略。
-     每个策略必须包含绝对过滤条件、相对排序条件、软指标和应急预案。
-
-核心约束:
-  - 严禁使用绝对分数作为唯一标准!
-  - 必须区分 absolute_filters / relative_rankings / soft_metrics 三类规则
-  - 每个策略必须有 contingency_plan
+AutoVS-Agent v2.0: Strategy Generator (详细策略生成器)
+========================================================
+基于深度调研报告, 生成 5-10 个极其详细的虚拟筛选策略。
+每个策略包含: 具体步骤、每步工具、评价指标、具体数值阈值。
 """
 
 from __future__ import annotations
 
-import json
-import os
+import json, os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 
 # =============================================================================
-# 1. 结构化输出 Schema
+# 1. Pydantic Schema
 # =============================================================================
 
-class FilterRuleSchema(BaseModel):
-    rule_id: str = Field(..., description="规则唯一标识: filter_01, rank_01 等")
-    category: str = Field(
-        ..., description="absolute_filter / relative_ranking / soft_metric"
-    )
-    description: str = Field(..., description="人类可读的规则描述")
-    parameter: str = Field(..., description="参数名: MW, LogP, docking_score, PAINS 等")
-    operator: str = Field(..., description="运算符: <, >, <=, >=, in_range, top_percentile, must_not_match, should_match")
-    value: Any = Field(..., description="阈值或取值范围")
-    rationale: str = Field(..., description="科学依据")
-    relaxable: bool = Field(default=True, description="是否可在应急时放宽")
-    relaxed_value: Optional[Any] = Field(default=None, description="放宽后的值")
+class StrategyStep(BaseModel):
+    step_number: int = Field(..., description="步骤编号 1-N")
+    step_name: str = Field(..., description="步骤名称")
+    tool: str = Field(..., description="使用的工具: GNINA/smina/RDKit/PLIP/ADMET-AI/GROMACS/DeepSeek")
+    action: str = Field(..., description="具体操作描述 (100-200字)。包括运行参数、输入输出")
+    metric: str = Field(..., description="评价指标: 对接分数/CNN_VS/PLIP_score/MW/LogP/PAINS等")
+    threshold: str = Field(..., description="具体阈值或判断标准。如'CNN_VS > 5.0'或'对接分数前10%'")
+    rationale: str = Field(..., description="为什么这样设计 (50-100字)")
 
 
-class ContingencyPlanSchema(BaseModel):
-    trigger_condition: str = Field(
-        ..., description="触发应急预案的条件，如 'survivors < 10'"
-    )
-    relaxation_steps: List[Dict[str, Any]] = Field(
-        ...,
-        min_length=1,
-        description="有序的放宽步骤列表。每步: {rule_id, new_value, reason}"
-    )
-    minimum_acceptable_thresholds: Dict[str, Any] = Field(
-        ..., description="底线阈值，超过此值则策略不可用"
-    )
-    fallback_strategy: str = Field(
-        ..., description="如果所有放宽步骤都失败, 应该做什么"
-    )
+class DetailedStrategy(BaseModel):
+    strategy_name: str = Field(..., description="策略名称")
+    strategy_tagline: str = Field(..., description="一句话总结")
+    approach_type: str = Field(..., description="structure_based/ligand_based/hybrid/ml_driven/fragment_based")
+    rationale: str = Field(..., description="为什么这个策略适合该靶点 (引用调研报告中的发现)")
+    pipeline_steps: List[StrategyStep] = Field(..., min_length=3, max_length=10)
+    survival_estimate: str = Field(..., description="每步后的估算存活率")
+    contingency: str = Field(..., description="应急预案: 如果存活<10, 放宽哪些步骤?")
+    strengths: List[str] = Field(...)
+    weaknesses: List[str] = Field(...)
+    estimated_runtime: str = Field(default="", description="估算计算时间")
+    suitable_when: str = Field(default="", description="什么情况下这个策略最优")
 
 
-class CandidateStrategySchema(BaseModel):
-    strategy_name: str = Field(
-        ..., description="策略名称，如 '保守SBDD策略' / '激进bRo5策略' / 'ML优先策略'"
-    )
-    strategy_tagline: str = Field(
-        ..., description="一句话总结，如 '高门槛，低假阳性，适合有共晶结构的经典靶点'"
-    )
-    rationale: str = Field(
-        ..., description="为什么这个策略适合该靶点 (200-400字)"
-    )
-    approach_type: str = Field(
-        ..., description="structure_based / ligand_based / hybrid / ml_driven"
-    )
-    absolute_filters: List[FilterRuleSchema] = Field(
-        ...,
-        min_length=1,
-        description="绝对过滤条件 (一票否决)。如 PAINS, 毒性基团, MW>1000 等"
-    )
-    relative_rankings: List[FilterRuleSchema] = Field(
-        ...,
-        min_length=1,
-        description="相对排序条件 (择优而非淘汰)。如 对接分数前5%, LogP最优区间等"
-    )
-    soft_metrics: List[FilterRuleSchema] = Field(
-        default_factory=list,
-        description="加分/减分软指标。如 QED>0.5, TPSA<140 加5分 等"
-    )
-    contingency_plan: ContingencyPlanSchema = Field(
-        ..., description="应急预案"
-    )
-    estimated_survival_rate: str = Field(
-        ..., description="估算的存活率，如 '~5% → ~5000 survivors from 100K'"
-    )
-    strengths: List[str] = Field(..., min_length=1, description="本策略的优势")
-    weaknesses: List[str] = Field(..., min_length=1, description="本策略的劣势")
+class DetailedStrategyOutput(BaseModel):
+    generation_rationale: str = Field(..., description="为什么选择这些策略方向")
+    strategies: List[DetailedStrategy] = Field(..., min_length=5, max_length=10)
 
 
-class StrategyGenerationOutput(BaseModel):
-    """策略生成器的完整输出: 3-5 个差异化策略。"""
-
-    generation_rationale: str = Field(
-        ..., description="为什么生成这几个差异化的策略 (200-400字)"
-    )
-    strategies: List[CandidateStrategySchema] = Field(
-        ...,
-        min_length=3,
-        max_length=5,
-        description="3-5 个差异化虚拟筛选策略",
-    )
-
-
-StrategyGenerationOutput.model_rebuild()
-CandidateStrategySchema.model_rebuild()
-ContingencyPlanSchema.model_rebuild()
-FilterRuleSchema.model_rebuild()
+DetailedStrategyOutput.model_rebuild()
+DetailedStrategy.model_rebuild()
+StrategyStep.model_rebuild()
 
 
 # =============================================================================
-# 2. 核心系统提示词
+# 2. Prompt
 # =============================================================================
 
-STRATEGY_GENERATOR_SYSTEM_PROMPT = """\
-# 人设: 虚拟筛选策略架构师 (VS Strategy Architect)
+STRATEGY_DETAILED_PROMPT = """\
+# 人设: 虚拟筛选策略架构师
 
-你是一位在制药工业界有 15 年经验的**虚拟筛选策略架构师**。
-你的任务是基于靶点情报分析师提供的 TargetProfile，
-设计 **3-5 个差异化 (Divergent) 的虚拟筛选策略**。
+你基于深度调研报告, 设计 5-10 个极其详细的虚拟筛选策略。
+每个策略必须具体到: 每一步用什么工具、跑什么参数、看什么指标、什么数值才算好。
 
----
-
-# 策略设计原则 (Critical!)
-
-## 1. 差异化要求
-你生成的策略必须覆盖**不同的方法论角度**:
-- **保守策略**: 严格过滤，低假阳性率，适合有高质量结构的靶点
-- **探索策略**: 放宽阈值，宁愿多筛不漏，适合缺乏已知配体的困难靶点
-- **混合策略**: 结合对接和机器学习预测
-- **配体中心策略**: 基于已知配体的药效团/相似性搜索
-- **片段中心策略**: 低分子量片段库优先，适合 FBDD
-
-## 2. 三类规则严格区分
-绝对不要混为一谈！每个策略必须清晰区分:
-
-### A. 绝对过滤条件 (absolute_filters)
-- 一票否决! 满足任一条件立即淘汰
-- 例子: PAINS 子结构、已知毒性基团、MW>1000、不可合成的分子
-- 这些条件即使导致存活率为 0 也不能放松 — 它们是科学红线
-
-### B. 相对排序条件 (relative_rankings)
-- 不直接淘汰! 用于排序和选取 Top-N
-- 例子: 对接分数前 5%、LogP 在 2-4 范围内的优先
-- 核心原则: **严禁使用绝对分数作为唯一标准!**
-  不要写 "docking_score < -9.5" (这是绝对过滤!)
-  应该写 "docking_score 排名前 10%" (相对!)
-- 如果必须使用数值阈值，必须在 rationale 中充分说明科学依据
-
-### C. 软指标 (soft_metrics)
-- 加分/减分项，综合评分时参考
-- 例子: QED > 0.5 (+5分), TPSA > 140 (-3分)
-
-## 3. 应急预案 (Contingency Plan) — 强制要求!
-每个策略必须包含详细的应急预案:
-- **触发条件**: 明确写 "survivors < 10" 或 "survivors < 1%"
-- **放宽步骤**: 有序列表，先放宽相对排序条件，最后才动绝对过滤条件
-- **底线阈值**: 写明确认哪些条件绝对不能放宽 (如 PAINS 红线)
-- **兜底方案**: 如果放宽后仍然失败，该怎么办?
-
----
-
-# 输出格式
-严格输出 StrategyGenerationOutput JSON Schema。
+# 策略设计要求
+- 每个策略包含 3-10 个具体步骤
+- 每步说明: 工具、操作、评价指标、具体阈值
+- 阈值必须有科学依据 (引用调研报告中的配体活性值/口袋特征)
+- **严禁**使用泛泛的"good score"/"reasonable value"
+- 必须给出具体数值: "CNN_VS > 5.5", "MW 在 300-700", "PLIP score ≥ 12"
+- 必须覆盖至少 5 个差异化方向:
+  1) 严格SBDD 2) 宽松探索 3) 配体相似性 4) ML/AI驱动 5) 药效团优先 6) 片段筛选 7) 共价筛选 8) 多轮迭代
 """
 
 
 # =============================================================================
-# 3. StrategyGeneratorAgent
+# 3. Agent
 # =============================================================================
 
 class StrategyGeneratorAgent:
-    """策略生成器 — 基于靶点画像生成多个差异化虚拟筛选策略。"""
-
-    def __init__(
-        self,
-        model: str = "deepseek-chat",
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
-        temperature: float = 0.4,
-        max_tokens: int = 8192,
-    ):
+    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.4, max_tokens=8192):
         self.model = model
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
@@ -198,211 +92,92 @@ class StrategyGeneratorAgent:
             self._client = OpenAI(api_key=self.api_key, base_url=f"{self.api_base}/v1")
         return self._client
 
-    def generate_strategies(
-        self,
-        target_profile: dict,
-        target_info: Optional[dict] = None,
-    ) -> Dict[str, Any]:
-        """生成 3-5 个差异化策略。
+    def generate_strategies(self, research_report: dict, target_info: Optional[dict] = None) -> Dict[str, Any]:
+        report_text = research_report.get("full_report_text", "")
+        if not report_text:
+            report_text = json.dumps(research_report, ensure_ascii=False, indent=2)
 
-        Args:
-            target_profile: TargetProfile dict (来自 Target Scout)。
-            target_info: 原始 TargetInfo (可选)。
+        prompt = f"""\
+## 靶点深度调研报告
 
-        Returns:
-            {
-                "strategies": List[CandidateStrategy],
-                "generation_rationale": str,
-            }
-        """
-        user_prompt = self._build_prompt(target_profile, target_info)
+{report_text[:6000]}
 
+### 任务
+基于以上调研报告, 设计 5-10 个极其详细的虚拟筛选策略。
+每个策略必须包含 pipeline_steps (每步的具体工具/参数/指标/阈值)。
+**阈值必须引用调研报告中的具体数值!**
+"""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
+            resp = self.client.chat.completions.create(
+                model=self.model, temperature=self.temperature, max_tokens=self.max_tokens,
                 messages=[
-                    {"role": "system", "content": STRATEGY_GENERATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                    {"role": "system", "content": f"请严格输出 JSON:\n{json.dumps(StrategyGenerationOutput.model_json_schema(), indent=2, ensure_ascii=False)}"},
+                    {"role": "system", "content": STRATEGY_DETAILED_PROMPT},
+                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": f"JSON Schema:\n{json.dumps(DetailedStrategyOutput.model_json_schema(), indent=2, ensure_ascii=False)}"},
                 ],
                 response_format={"type": "json_object"},
             )
-            raw = response.choices[0].message.content.strip()
-            parsed = json.loads(raw)
-            validated = StrategyGenerationOutput.model_validate(parsed)
-
-            return {
-                "strategies": [s.model_dump() for s in validated.strategies],
-                "generation_rationale": validated.generation_rationale,
-            }
+            validated = DetailedStrategyOutput.model_validate(json.loads(resp.choices[0].message.content.strip()))
+            return {"strategies": [s.model_dump() for s in validated.strategies],
+                    "generation_rationale": validated.generation_rationale}
         except Exception as e:
-            # 降级: 返回 3 个基本策略
-            return self._fallback_strategies(target_profile, str(e))
+            return self._fallback(report_text, str(e))
 
-    def _build_prompt(self, profile: dict, target_info: Optional[dict] = None) -> str:
-        """构建策略生成 User Prompt。"""
-        sa = profile.get("structural_assessment", {})
-        kl = profile.get("known_ligand_info", {})
-        pm = profile.get("priority_metrics", {})
+    def _fallback(self, report: str, err: str) -> Dict[str, Any]:
+        strategies = []
+        for i, (name, tag, atype, steps) in enumerate([
+            ("严格SBDD策略", "基于共晶结构精准对接+PLIP严格筛选",
+             "structure_based",
+             [{"step_number":1,"step_name":"SMILES→3D SDF","tool":"RDKit ETKDGv3","action":"生成3D构象, MMFF94优化","metric":"conformer_count","threshold":"有效构象>90%","rationale":"对接需3D结构"},
+              {"step_number":2,"step_name":"GNINA精对接","tool":"GNINA refinement","action":"exhaustiveness=64, num_modes=9","metric":"CNN_VS","threshold":"CNN_VS > 5.0","rationale":"基于调研报告的共晶结构"},
+              {"step_number":3,"step_name":"PLIP相互作用","tool":"PLIP","action":"分析氢键/疏水/盐桥","metric":"PLIP_score","threshold":">=15","rationale":"保留关键残基匹配的分子"},
+              {"step_number":4,"step_name":"ADMET过滤","tool":"ADMET-AI","action":"预测40+属性","metric":"PAINS_alert","threshold":"PAINS=0 AND hERG=low","rationale":"排除假阳性"},
+              {"step_number":5,"step_name":"理化性质过滤","tool":"RDKit","action":"MW/LogP/TPSA","metric":"MW","threshold":"150<MW<600","rationale":"类药性"}]),
+            ("探索性宽松策略", "扩大小分子化学空间, 优先召回率",
+             "hybrid",
+             [{"step_number":1,"step_name":"GNINA粗对接","tool":"GNINA rough","action":"exhaustiveness=8","metric":"CNN_VS","threshold":"CNN_VS > 3.0","rationale":"降低门槛避免漏筛"},
+              {"step_number":2,"step_name":"PAINS过滤","tool":"RDKit SMARTS","action":"排除已知PAINS子结构","metric":"PAINS_count","threshold":"PAINS=0","rationale":"唯一红线"},
+              {"step_number":3,"step_name":"药效团筛选","tool":"RDKit","action":"保留含关键药效团的分子","metric":"pharmacophore_match","threshold":"至少1个","rationale":"基于SAR"}]),
+            ("配体相似性策略", "以已知活性配体为模板进行相似性搜索",
+             "ligand_based",
+             [{"step_number":1,"step_name":"Tanimoto指纹筛选","tool":"RDKit Morgan2","action":"与已知配体计算Tanimoto","metric":"Tanimoto","threshold":">0.35","rationale":"化学空间聚焦"},
+              {"step_number":2,"step_name":"对接","tool":"GNINA","action":"exhaustiveness=16","metric":"CNN_VS","threshold":">4.0","rationale":"相似分子优先对接"}]),
+            ("ML驱动策略", "用ADMET-AI+对接分数训练分类器排序",
+             "ml_driven",
+             [{"step_number":1,"step_name":"特征工程","tool":"RDKit","action":"ECFP4+理化性质+对接分数","metric":"feature_dim","threshold":"2048+","rationale":"ML输入"},
+              {"step_number":2,"step_name":"模型预测","tool":"ADMET-AI","action":"预测ADMET+活性概率","metric":"probability","threshold":"active_prob>0.7","rationale":"综合排序"}]),
+            ("多轮迭代策略", "第一轮宽筛→分析→第二轮精筛",
+             "hybrid",
+             [{"step_number":1,"step_name":"第一轮粗筛","tool":"GNINA","action":"exhaustiveness=8, Top20%","metric":"CNN_VS","threshold":"保留前20%","rationale":"宽筛"},
+              {"step_number":2,"step_name":"分析第一轮","tool":"PLIP+RDKit","action":"富集模式分析","metric":"enrichment","threshold":"富集率>2倍","rationale":"指导第二轮"},
+              {"step_number":3,"step_name":"第二轮精筛","tool":"GNINA refinement","action":"exhaustiveness=64","metric":"CNN_VS","threshold":">5.5","rationale":"精确筛选"}]),
+        ]):
+            strategies.append({
+                "strategy_name": name, "strategy_tagline": tag, "approach_type": atype,
+                "rationale": f"基于调研报告的自动生成策略。{err[:100]}",
+                "pipeline_steps": steps, "survival_estimate": f"~{100-(i+1)*15}%",
+                "contingency": "放宽阈值20%", "strengths": ["自动化"], "weaknesses": ["需人工审查"],
+                "estimated_runtime": "~2-5天", "suitable_when": "通用",
+            })
+        return {"strategies": strategies, "generation_rationale": f"[FALLBACK] {err[:200]}"}
 
-        return f"""\
-## 策略生成任务
+    def generate_strategies_from_text(self, query: str, research_report: dict) -> Dict[str, Any]:
+        return self.generate_strategies(research_report)
 
-### 靶点画像摘要
-- **靶点**: {profile.get('target_name', 'Unknown')}
-- **口袋类型**: {sa.get('pocket_type', 'unknown')}
-- **口袋体积**: {sa.get('pocket_volume_estimate', 'unknown')}
-- **口袋极性**: {sa.get('pocket_polarity', 'unknown')}
-- **有共晶结构**: {sa.get('has_cocrystal_with_ligand', False)}
-- **有已知配体**: {kl.get('has_known_active_ligands', False)}
-- **已知配体亲和力**: {kl.get('binding_affinity_range', 'unknown')}
-- **蛋白柔性**: {sa.get('flexibility_concern', 'unknown')}
-
-### 优先级指标
-- **主要指标**: {pm.get('primary_metrics', [])}
-- **红线**: {pm.get('red_flags', [])}
-- **建议阈值**: {pm.get('suggested_thresholds', {})}
-
-### 设计挑战
-{profile.get('drug_design_challenges', [])}
-
-### 推荐技术路线
-{profile.get('recommended_approaches', [])}
-
-### 任务
-请基于以上靶点画像，设计 3-5 个差异化的虚拟筛选策略。
-每个策略必须包含完整的过滤规则和应急预案。
-"""
-
-    def _fallback_strategies(self, profile: dict, error: str) -> Dict[str, Any]:
-        """LLM 不可用时的降级策略集。"""
-        sa = profile.get("structural_assessment", {})
-        pocket_type = sa.get("pocket_type", "unknown")
-
-        strategies = [
-            {
-                "strategy_name": "保守SBDD策略",
-                "strategy_tagline": "严格过滤，低假阳性",
-                "rationale": "基于结构的保守策略。利用对接和理化性质严格筛选。",
-                "approach_type": "structure_based",
-                "absolute_filters": [
-                    {"rule_id": "abs_01", "category": "absolute_filter", "description": "排除PAINS子结构", "parameter": "PAINS", "operator": "must_not_match", "value": "any", "rationale": "假阳性干扰", "relaxable": False, "relaxed_value": None},
-                    {"rule_id": "abs_02", "category": "absolute_filter", "description": "排除已知毒性基团", "parameter": "toxicity_SMARTS", "operator": "must_not_match", "value": "any", "rationale": "安全性红线", "relaxable": False, "relaxed_value": None},
-                ],
-                "relative_rankings": [
-                    {"rule_id": "rel_01", "category": "relative_ranking", "description": "对接分数前15%", "parameter": "docking_score", "operator": "top_percentile", "value": 15, "rationale": "择优而非淘汰", "relaxable": True, "relaxed_value": 25},
-                ],
-                "soft_metrics": [
-                    {"rule_id": "soft_01", "category": "soft_metric", "description": "QED>0.5 加分", "parameter": "QED", "operator": ">", "value": 0.5, "rationale": "类药性偏好", "relaxable": True, "relaxed_value": 0.3},
-                ],
-                "contingency_plan": {
-                    "trigger_condition": "survivors < 10",
-                    "relaxation_steps": [{"rule_id": "rel_01", "new_value": 25, "reason": "放宽排序阈值"}, {"rule_id": "soft_01", "new_value": 0.3, "reason": "放宽软指标"}],
-                    "minimum_acceptable_thresholds": {"MW": 1000, "LogP": 8},
-                    "fallback_strategy": "切换到探索策略",
-                },
-                "estimated_survival_rate": "~3% (~3000 from 100K)",
-                "strengths": ["低假阳性率", "SBDD黄金标准"],
-                "weaknesses": ["可能漏掉非经典结合模式", f"口袋类型={pocket_type}可能不适用"],
-            },
-            {
-                "strategy_name": "探索性宽松策略",
-                "strategy_tagline": "宽松阈值，多筛不漏",
-                "rationale": "对于口袋特征不明确的靶点，宽松过滤避免假阴性。",
-                "approach_type": "hybrid",
-                "absolute_filters": [
-                    {"rule_id": "abs_01", "category": "absolute_filter", "description": "排除PAINS子结构", "parameter": "PAINS", "operator": "must_not_match", "value": "any", "rationale": "假阳性干扰", "relaxable": False, "relaxed_value": None},
-                ],
-                "relative_rankings": [
-                    {"rule_id": "rel_01", "category": "relative_ranking", "description": "对接分数前30%", "parameter": "docking_score", "operator": "top_percentile", "value": 30, "rationale": "宽筛", "relaxable": True, "relaxed_value": 50},
-                ],
-                "soft_metrics": [],
-                "contingency_plan": {
-                    "trigger_condition": "survivors < 10",
-                    "relaxation_steps": [{"rule_id": "rel_01", "new_value": 50, "reason": "扩大筛选范围"}],
-                    "minimum_acceptable_thresholds": {},
-                    "fallback_strategy": "只保留PAINS过滤，其他全部通过",
-                },
-                "estimated_survival_rate": "~15% (~15000 from 100K)",
-                "strengths": ["高召回率", "适合困难靶点"],
-                "weaknesses": ["高假阳性率", "下游负担重"],
-            },
-            {
-                "strategy_name": "配体驱动相似性策略",
-                "strategy_tagline": "以已知配体为锚点",
-                "rationale": "如果有已知活性配体，优先筛选结构相似的分子。",
-                "approach_type": "ligand_based",
-                "absolute_filters": [
-                    {"rule_id": "abs_01", "category": "absolute_filter", "description": "排除PAINS", "parameter": "PAINS", "operator": "must_not_match", "value": "any", "rationale": "假阳性", "relaxable": False, "relaxed_value": None},
-                ],
-                "relative_rankings": [
-                    {"rule_id": "rel_01", "category": "relative_ranking", "description": "与已知配体Tanimoto>0.4优先", "parameter": "tanimoto_similarity", "operator": ">", "value": 0.4, "rationale": "化学空间聚焦", "relaxable": True, "relaxed_value": 0.3},
-                    {"rule_id": "rel_02", "category": "relative_ranking", "description": "药效团匹配前20%", "parameter": "pharmacophore_score", "operator": "top_percentile", "value": 20, "rationale": "药效团优先", "relaxable": True, "relaxed_value": 40},
-                ],
-                "soft_metrics": [],
-                "contingency_plan": {
-                    "trigger_condition": "survivors < 10",
-                    "relaxation_steps": [{"rule_id": "rel_01", "new_value": 0.3, "reason": "降低相似度阈值"}],
-                    "minimum_acceptable_thresholds": {"tanimoto_similarity": 0.25},
-                    "fallback_strategy": "放弃配体约束，仅依赖对接",
-                },
-                "estimated_survival_rate": "~5% (~5000 from 100K)",
-                "strengths": ["化学空间聚焦", "高富集率"],
-                "weaknesses": ["依赖已知配体质量", "可能错过新骨架"],
-            },
-        ]
-
-        return {
-            "strategies": strategies,
-            "generation_rationale": f"[FALLBACK] LLM call failed: {error[:200]}. Using 3 default strategies.",
-        }
-
-
-# =============================================================================
-# 4. LangGraph 节点
-# =============================================================================
 
 def strategy_generation_node(state: dict) -> dict:
-    """Step 2: Strategy Generation — 基于靶点画像生成多策略。"""
-    from datetime import datetime as dt
-
     agent = StrategyGeneratorAgent()
-    result = agent.generate_strategies(
-        target_profile=state.get("target_profile", {}),
-        target_info=state.get("target_info"),
-    )
-
-    strategies = result.get("strategies", [])
-
-    # 初始化 Elo 积分
-    elo_ratings = {}
-    for s in strategies:
-        elo_ratings[s["strategy_name"]] = state["tournament_state"]["elo_initial_rating"]
-
-    # 构建配对队列 (所有两两组合)
-    pairings = []
-    for i in range(len(strategies)):
-        for j in range(i + 1, len(strategies)):
-            pairings.append([strategies[i]["strategy_name"], strategies[j]["strategy_name"]])
-
-    now = dt.now(timezone.utc).isoformat()
+    profile = state.get("target_profile", {})
+    result = agent.generate_strategies(profile, state.get("target_info"))
+    strategies = result["strategies"]
+    elo = {s["strategy_name"]: state["tournament_state"]["elo_initial_rating"] for s in strategies}
+    pairings = [[strategies[i]["strategy_name"], strategies[j]["strategy_name"]]
+                for i in range(len(strategies)) for j in range(i+1, len(strategies))]
+    now = datetime.now(timezone.utc).isoformat()
     return {
-        "pipeline_stage": "strategy_generation",
-        "candidate_strategies": strategies,
-        "tournament_state": {
-            **state["tournament_state"],
-            "round_number": 0,
-            "elo_ratings": elo_ratings,
-            "pairings_queue": pairings,
-            "completed_debates": 0,
-            "current_leader": strategies[0]["strategy_name"] if strategies else "",
-        },
+        "pipeline_stage": "strategy_generation", "candidate_strategies": strategies,
+        "tournament_state": {**state["tournament_state"], "elo_ratings": elo, "pairings_queue": pairings,
+                             "completed_debates": 0, "current_leader": strategies[0]["strategy_name"] if strategies else ""},
         "updated_at": now,
-        "event_log": [
-            f"[{now}] [StrategyGen] {len(strategies)} strategies generated. "
-            f"Pairings: {len(pairings)} debates scheduled. "
-            f"Rationale: {result.get('generation_rationale', '')[:100]}"
-        ],
+        "event_log": [f"[{now}] [StrategyGen] {len(strategies)} strategies, {len(pairings)} debates."],
     }

@@ -156,7 +156,15 @@ class StrategyJudge:
             raw = response.choices[0].message.content.strip()
             parsed = json.loads(raw)
             verdict = StrategyVerdict.model_validate(parsed)
-            return verdict.model_dump()
+
+            # ---- 胜者名校验: 防止LLM返回 "strategy_a" / "策略A" 等标签 ----
+            name_a = strategy_a.get("strategy_name", "")
+            name_b = strategy_b.get("strategy_name", "")
+            verdict_dict = verdict.model_dump()
+            verdict_dict = StrategyJudge._validate_winner(
+                verdict_dict, name_a, name_b,
+            )
+            return verdict_dict
         except Exception as e:
             return self._fallback_verdict(strategy_a, strategy_b, attacks_on_a, attacks_on_b, str(e))
 
@@ -219,6 +227,58 @@ class StrategyJudge:
             "judge_commentary": f"基于红军认可度平均值: A={avg_a:.2f}, B={avg_b:.2f}",
             "suggestions_for_loser": ["请人工审查辩论记录"],
         }
+
+    @staticmethod
+    def _validate_winner(
+        verdict: Dict[str, Any],
+        name_a: str,
+        name_b: str,
+    ) -> Dict[str, Any]:
+        """校验 LLM 返回的 winner 是否是实际策略名。
+
+        LLM 可能返回 "strategy_a" / "策略A" / "A" / 策略名本身。
+        此方法将非实际策略名的返回值映射为正确的名称。
+        """
+        winner = str(verdict.get("winner", "")).strip()
+
+        # 直接匹配成功
+        if winner == name_a or winner == name_b:
+            return verdict
+
+        # LLM 返回了 "strategy_a" 或 "strategy_A"
+        if winner.lower() in ("strategy_a", "strategy a", "a"):
+            verdict["winner"] = name_a
+            verdict["judge_commentary"] += f" [winner corrected: '{winner}' → '{name_a}']"
+            return verdict
+
+        # LLM 返回了 "strategy_b" 或 "strategy_B"
+        if winner.lower() in ("strategy_b", "strategy b", "b"):
+            verdict["winner"] = name_b
+            verdict["judge_commentary"] += f" [winner corrected: '{winner}' → '{name_b}']"
+            return verdict
+
+        # LLM 返回了 "策略A" / "保守SBDD" 等包含关键词的
+        if name_a in winner or (len(winner) < 3 and winner.upper() == "A"):
+            verdict["winner"] = name_a
+            return verdict
+        if name_b in winner or (len(winner) < 3 and winner.upper() == "B"):
+            verdict["winner"] = name_b
+            return verdict
+
+        # 兜底: 启发式裁决
+        score_a = verdict.get("strategy_a_score", 50)
+        score_b = verdict.get("strategy_b_score", 50)
+        if score_a > score_b:
+            verdict["winner"] = name_a
+        elif score_b > score_a:
+            verdict["winner"] = name_b
+        else:
+            verdict["winner"] = "tie"
+        verdict["judge_commentary"] += (
+            f" [winner auto-resolved from scores: "
+            f"A={score_a}, B={score_b}, → {verdict['winner']}]"
+        )
+        return verdict
 
     @staticmethod
     def update_elo(
