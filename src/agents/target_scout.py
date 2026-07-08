@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -106,45 +106,21 @@ class TargetResearchReport(BaseModel):
     verification_log: List[str] = Field(default_factory=list)
     research_timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    @field_validator('target_organism', 'gene_symbol', 'target_macromolecule_type', 'target_name', mode='before')
+    @classmethod
+    def sanitize_and_default(cls, v, info):
+        """内建Validator: 物理拦截 ? / Unknown / N/A / 空, 替换为默认值。"""
+        if not isinstance(v, str):
+            return v
+        cleaned = v.strip()
+        if cleaned.lower() in ("?", "unknown", "n/a", "none", "") or cleaned.startswith("?") or cleaned == "???":
+            defaults = {"target_organism": "Homo sapiens", "gene_symbol": "N/A",
+                        "target_macromolecule_type": "Protein", "target_name": "Unknown Target"}
+            return defaults.get(info.field_name, cleaned)
+        return cleaned
 
-# 🆕 Pydantic @field_validator: 物理拦截 "?" / "Unknown" / 空字符串
-from pydantic import field_validator
-
-_SANITIZE_MAP = {"?": "", "unknown": "", "n/a": "", "none": ""}
-
-@classmethod
-def _sanitize_string(cls, v):
-    if not isinstance(v, str): return v
-    cleaned = v.strip()
-    if cleaned.lower() in _SANITIZE_MAP or cleaned in ("", "?", "Unknown", "N/A", "None"):
-        return ""
-    return cleaned
-
-# 动态添加validators
-for _field in ["target_organism", "gene_symbol", "target_macromolecule_type"]:
-    if _field in TargetResearchReport.model_fields:
-        setattr(TargetResearchReport, f"_sanitize_{_field}",
-                field_validator(_field, mode="before")(_sanitize_string))
 
 TargetResearchReport.model_rebuild()
-
-# 后处理: 给清洗后的字段补默认值 (validator只在before模式运行, 需要after补默认值)
-def _apply_model_defaults(report: dict) -> dict:
-    """Pydantic model_dump后的默认值补全 (兜底, 确保 ? 绝不流出)。"""
-    # 先清洗所有字符串字段的 ?/Unknown/N/A
-    for key in list(report.keys()):
-        if isinstance(report[key], str) and report[key].strip().lower() in ("?", "unknown", "n/a", "none", ""):
-            report[key] = ""
-    # 补默认值
-    if not report.get("target_organism") or report["target_organism"] in ("", "?", "Unknown"):
-        report["target_organism"] = "Homo sapiens"
-    if not report.get("target_macromolecule_type") or report["target_macromolecule_type"] in ("", "?"):
-        report["target_macromolecule_type"] = "Protein"
-    if not report.get("gene_symbol") or report["gene_symbol"] in ("", "?", "Unknown"):
-        report["gene_symbol"] = "N/A"
-    if not report.get("target_name") or report["target_name"] in ("", "?"):
-        report["target_name"] = "Unknown Target"
-    return report
 VerifiedPDBInfo.model_rebuild()
 ChemblActivity.model_rebuild()
 BindingSiteAnalysis.model_rebuild()
@@ -562,8 +538,6 @@ def scrub_report(report: Dict[str, Any]) -> Dict[str, Any]:
         for k in ("pocket_description", "key_residues_text", "docking_box_strategy"):
             if k in bs and isinstance(bs[k], str):
                 bs[k] = scrub_hallucinated_coordinates(bs[k])
-    # 🆕 应用默认值
-    report = _apply_model_defaults(report)
     return report
 
 
@@ -820,7 +794,8 @@ class TargetScoutAgent:
         tool_data_text = self._format_tool_data(recommended_pdb, docking_center, verified_pdbs, chembl_activities)
         user_prompt = self._build_prompt(query, gene_symbol or gene, uniprot_id, uniprot_data,
                                           verified_pdbs, recommended_pdb, docking_center,
-                                          chembl_activities, tool_data_text)
+                                          chembl_activities, tool_data_text,
+                                          expected_organism, mol_type)
 
         # ── Step 6: LLM归纳生成报告 ──
         report = self._call_llm_for_report(user_prompt)
@@ -877,8 +852,9 @@ class TargetScoutAgent:
         return "\n".join(lines)
 
     def _build_prompt(self, query, gene, uniprot_id, uniprot_data, verified_pdbs,
-                      recommended_pdb, docking_center, chembl_activities, tool_data_text):
-        parts = [f"## 靶点调研任务\n查询: {query}\n基因: {gene}\nUniProt: {uniprot_id}"]
+                      recommended_pdb, docking_center, chembl_activities, tool_data_text,
+                      expected_organism="", mol_type="Protein"):
+        parts = [f"## 靶点调研任务\n查询: {query}\n基因/靶点: {gene}\nUniProt: {uniprot_id}\n物种: {expected_organism}\n类型: {mol_type}"]
         if uniprot_data:
             parts.append(f"### UniProt数据\n蛋白: {uniprot_data.get('protein_name','?')}\n功能: {uniprot_data.get('function','?')[:600]}")
         parts.append(tool_data_text)
