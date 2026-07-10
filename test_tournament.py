@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """AutoVS-Agent v3.0 — 策略排名锦标赛 (瑞士制版)"""
 from __future__ import annotations
-import hashlib, os, sys, re, glob as _glob, json, math
+import hashlib, os, sys, re, glob as _glob, json
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-YOUR_QUERY = "Finding ligands targeting the triple Tudor domain of SETDB1"
-SKIP_RESEARCH = True
-SKIP_STRATEGY = True
-SKIP_EVALUATION = True
-EVOLVE_TOP_N = 3
-LOAD_FROM_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_155837_a2940a03"
-LOAD_STRATEGIES_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_155837_a2940a03/strategies"
-RESEARCH_REPORT_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_155837_a2940a03"
+YOUR_QUERY = "基于靶点bcl-2去筛选一个抗衰老药物，要求其具有高选择性，不能作用于bcl-xl，且具有良好的ADMET性质。"
+SKIP_RESEARCH = True  # 跳过Step0, 从已有文件加载
+SKIP_STRATEGY = True  # 跳过Step0-1, 从已有文件加载
+LOAD_STRATEGIES_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb/strategies"
+RESEARCH_REPORT_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb"
 SWISS_ROUNDS = 4
+SKIP_EVALUATION = True   # 跳过Step2-3, 从已有文件加载
+LOAD_FROM_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb"  # 已有任务目录
+EVOLVE_TOP_N = 3         # Step 4: 进化前N名, 0=跳过进化
 
 SEP = "=" * 70
 def hdr(t): print(f"\n{SEP}\n  {t}\n{SEP}")
@@ -94,6 +94,7 @@ def load_research_report(report_dir: str) -> dict:
 # =========================================================================
 
 def swiss_pairings(strategies: list, elo: dict, history: set) -> list:
+    """按当前Elo降序, 相邻配对, 跳过已打过的配对。"""
     ranked = sorted(strategies, key=lambda s: elo.get(s["strategy_name"],1500), reverse=True)
     names = [s["strategy_name"] for s in ranked]
     pairings = []
@@ -133,12 +134,15 @@ def run_test():
         from src.agents.target_scout import TargetScoutAgent
         report = TargetScoutAgent().deep_research(YOUR_QUERY)
 
+    # 保存调研报告
     rf = os.path.join(TASK_DIR, "research_report.md")
     bs = report.get('binding_site', {})
     with open(rf, "w", encoding="utf-8") as f:
         f.write(f"# 靶点深度调研报告: {report.get('target_name','?')}\n\n")
-        f.write(f"## 靶点信息\n**基因**: {report.get('gene_symbol','?')} | "
+        f.write(f"## 靶点信息\n")
+        f.write(f"**基因**: {report.get('gene_symbol','?')} | "
                 f"**UniProt**: {report.get('uniprot_id','?')} | "
+                f"**类型**: {report.get('target_macromolecule_type','Protein')} | "
                 f"**物种**: {report.get('target_organism','?')}\n\n")
         f.write(f"## 结合位点\n- 口袋: {bs.get('pocket_description','?')}\n\n")
         f.write(report.get('full_report_text', '') + "\n")
@@ -156,31 +160,36 @@ def run_test():
         result = StrategyGeneratorAgent().generate_strategies(report)
         strategies = result["strategies"]
         print(f"  ✅ {len(strategies)} 策略")
+
+        # 保存策略
         strat_dir = os.path.join(TASK_DIR, "strategies")
         os.makedirs(strat_dir, exist_ok=True)
         for i, s in enumerate(strategies, 1):
             sf = os.path.join(strat_dir,
                 f"strategy_{i:02d}_{s['strategy_name'].replace('/','_').replace(':','_')[:60]}.md")
             with open(sf, "w", encoding="utf-8") as f:
-                f.write(f"# 策略 {i}: {s['strategy_name']}\n\n"
-                        f"**标签**: {s.get('strategy_tagline','')} | "
+                f.write(f"# 策略 {i}: {s['strategy_name']}\n\n")
+                f.write(f"**标签**: {s.get('strategy_tagline','')} | "
                         f"**方法**: {s.get('approach_type','?')} | "
                         f"**耗时**: {s.get('estimated_runtime','?')}\n\n")
                 f.write(f"## 原理\n{s.get('rationale','')}\n\n## 步骤\n")
                 for st in s.get("pipeline_steps", []):
-                    f.write(f"### Step {st.get('step_number','?')}: {st.get('step_name','?')}\n"
-                            f"| 工具 | 指标 | 阈值 |\n|---|---|---|\n"
-                            f"| {st.get('tool','?')} | {st.get('metric','?')} | {st.get('threshold','?')} |\n\n"
-                            f"**操作**: {st.get('action','?')}\n\n**理由**: {st.get('rationale','?')}\n\n")
-                f.write(f"**存活**: {s.get('survival_estimate','?')}\n\n"
-                        f"**应急**: {s.get('contingency','?')}\n\n"
-                        f"## 优势\n" + "\n".join(f"- {x}" for x in s.get('strengths',[])) + "\n\n"
-                        f"## 劣势\n" + "\n".join(f"- {x}" for x in s.get('weaknesses',[])) + "\n")
+                    f.write(f"### Step {st.get('step_number','?')}: {st.get('step_name','?')}\n")
+                    f.write(f"| 工具 | 指标 | 阈值 |\n|---|---|---|\n"
+                            f"| {st.get('tool','?')} | {st.get('metric','?')} | {st.get('threshold','?')} |\n\n")
+                    f.write(f"**操作**: {st.get('action','?')}\n\n**理由**: {st.get('rationale','?')}\n\n")
+                f.write(f"**存活**: {s.get('survival_estimate','?')}\n\n")
+                f.write(f"**应急**: {s.get('contingency','?')}\n\n")
+                f.write(f"## 优势\n" + "\n".join(f"- {x}" for x in s.get('strengths',[])) + "\n\n")
+                f.write(f"## 劣势\n" + "\n".join(f"- {x}" for x in s.get('weaknesses',[])) + "\n")
         print(f"  📁 {strat_dir}/")
 
-    if not strategies: print("  ❌ 无策略可评估"); return
-    for i, s in enumerate(strategies, 1): print(f"  {i}. {s['strategy_name'][:65]}")
-    if len(strategies) < 2: print("  ⚠️ 需要至少2个策略"); return
+    if not strategies:
+        print("  ❌ 无策略可评估"); return
+    for i, s in enumerate(strategies, 1):
+        print(f"  {i}. {s['strategy_name'][:65]}")
+    if len(strategies) < 2:
+        print("  ⚠️ 需要至少2个策略"); return
 
     # ── Step 2-3: 评审+锦标赛 ──
     from src.agents.expert_committee import TournamentReviewer
@@ -271,13 +280,17 @@ def run_test():
 
         hdr("🏆 最终排名")
         ranked = sorted(elo.items(), key=lambda x: x[1], reverse=True)
-        for rank, (name, esc) in enumerate(ranked, 1):
-            emoji = "🥇" if rank==1 else "🥈" if rank==2 else "🥉" if rank==3 else "  "
-            init_score = review_results.get(name, {}).get("weighted_score", "?")
-            change = esc - init_elo.get(name, esc)
-            print(f"  {emoji} {rank}. {name[:55]}")
-            print(f"     独立评分={init_score:.1f} | Elo={esc:.0f} "
-                  f"({'↑'+str(int(change)) if change>0 else '↓'+str(int(-change)) if change<0 else '—'})")
+
+    for rank, (name, esc) in enumerate(ranked, 1):
+        emoji = "🥇" if rank==1 else "🥈" if rank==2 else "🥉" if rank==3 else "  "
+        init_score = review_results.get(name, {}).get("weighted_score", "?")
+        try:
+            change = esc - init_elo[name]
+        except (NameError, KeyError):
+            change = 0
+        print(f"  {emoji} {rank}. {name[:55]}")
+        print(f"     独立评分={init_score:.1f} | Elo={esc:.0f} "
+              f"({'↑'+str(int(change)) if change>0 else '↓'+str(int(-change)) if change<0 else '—'})")
 
     # ── Step 4: 策略进化 + 迷你锦标赛验证 ──
     if EVOLVE_TOP_N > 0 and len(strategies) >= 3:
@@ -359,13 +372,13 @@ def run_test():
                 evo_name = next((en for en in evo_names if name in en), None)
                 evo_score = mini_reviews.get(evo_name, {}).get("weighted_score", 0) if evo_name else 0
                 evo_elo = mini_elo.get(evo_name, 0) if evo_name else 0
-                orig_elo = elo.get(name, 0)
+                orig_elo_val = elo.get(name, 0)
                 if evo_name:
                     delta = evo_score - orig_score
                     arrow = '↑' if delta > 0 else ('↓' if delta < 0 else '—')
                     print(f"  {name[:40]} → {evo_name[:40]}")
                     print(f"    评分: {orig_score:.1f} → {evo_score:.1f} "
-                          f"({arrow}{abs(int(delta))}) | Elo: {orig_elo:.0f} → {evo_elo:.0f}")
+                          f"({arrow}{abs(int(delta))}) | Elo: {orig_elo_val:.0f} → {evo_elo:.0f}")
 
     # 保存结果
     result_file = os.path.join(TASK_DIR, "tournament_results.json")
@@ -379,6 +392,7 @@ def run_test():
         }, f, ensure_ascii=False, indent=2)
     print(f"\n  📁 结果: {result_file}")
 
+    # 评审详情
     detail_dir = os.path.join(TASK_DIR, "reviews")
     os.makedirs(detail_dir, exist_ok=True)
     for name, rr in review_results.items():
@@ -386,6 +400,7 @@ def run_test():
         with open(os.path.join(detail_dir, f"review_{fname}.json"), "w", encoding="utf-8") as f:
             json.dump(rr, f, ensure_ascii=False, indent=2)
     print(f"  📁 评审详情: {detail_dir}/")
+
     print(f"\n{SEP}\n  ✅ {len(strategies)}策略 × {total_matches}场辩论 完成\n{SEP}")
 
 if __name__ == "__main__":
