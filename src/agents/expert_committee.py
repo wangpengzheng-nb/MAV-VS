@@ -9,7 +9,7 @@ AutoVS-Agent v2.0: Red Team Review Panel (红军三人设评审团)
 
 from __future__ import annotations
 
-import json, os
+import json, os, re
 from typing import Any, Dict, List, Optional
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -20,20 +20,20 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 class DomainAttack(BaseModel):
-    persona: str = Field(...)
-    persona_name: str = Field(...)
-    focus_area: str = Field(..., description="该专家的审查领域")
-    attack_points: List[str] = Field(..., min_length=2)
-    severity: str = Field(...)
-    agreement: float = Field(..., ge=0.0, le=1.0, description="0=完全不可行, 1=完全认可")
+    persona: str = Field(default="", description="medchem_veteran/funnel_terminator/target_specialist")
+    persona_name: str = Field(default="", description="可读名称")
+    focus_area: str = Field(default="", description="该专家的审查领域")
+    attack_points: List[str] = Field(default_factory=list, description="攻击点列表")
+    severity: str = Field(default="minor", description="critical/major/minor")
+    agreement: float = Field(default=0.5, ge=0.0, le=1.0, description="0=完全不可行, 1=完全认可")
     suggested_fixes: List[str] = Field(default_factory=list)
     reference_to_report: str = Field(default="", description="引用调研报告中支持该攻击的具体发现")
 
 
 class DebateOutput(BaseModel):
-    debate_summary: str = Field(...)
-    attacks_on_a: List[DomainAttack] = Field(..., min_length=3, max_length=3)
-    attacks_on_b: List[DomainAttack] = Field(..., min_length=3, max_length=3)
+    debate_summary: str = Field(default="", description="本轮辩论总体摘要")
+    attacks_on_a: List[DomainAttack] = Field(default_factory=list, description="对策略A的攻击")
+    attacks_on_b: List[DomainAttack] = Field(default_factory=list, description="对策略B的攻击")
 
 DebateOutput.model_rebuild()
 DomainAttack.model_rebuild()
@@ -85,9 +85,10 @@ RED_TEAM_PROMPT = """\
 
 # 评审规则
 1. 每位专家必须给出 agreement (0.0-1.0) — 对该策略的综合认可度
-2. attack_points 必须具体, 引用调研报告中的数据
-3. reference_to_report 必须填写, 说明引用了报告中的哪个发现
+2. attack_points 至少4条, 每条50-150字, 必须具体引用调研报告数据
+3. reference_to_report 必须填写, 说明引用了报告中的哪个具体发现
 4. 如果策略与靶点类型明显不匹配, severity 必须为 "critical"
+5. suggested_fixes 至少2条, 给出具体可操作的改进方案
 """
 
 
@@ -96,7 +97,7 @@ RED_TEAM_PROMPT = """\
 # =============================================================================
 
 class RedTeamReviewer:
-    def __init__(self, model="deepseek-reasoner", api_key=None, api_base=None, temperature=0.5, max_tokens=8192):
+    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.5, max_tokens=16384):
         self.model = model
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
@@ -116,12 +117,10 @@ class RedTeamReviewer:
         if research_report:
             report_text = (
                 f"靶点: {research_report.get('target_name','?')} "
-                f"(基因: {research_report.get('gene_name','?')}, "
-                f"类型: {research_report.get('target_class','?')})\n\n"
-                f"### 结构分析\n{research_report.get('structural_analysis','')[:800]}\n\n"
-                f"### 已知配体与SAR\n{research_report.get('known_ligands_sar','')[:600]}\n\n"
-                f"### 虚拟筛选建议\n{research_report.get('screening_recommendations','')[:800]}\n\n"
-                f"### 结合位点\n{json.dumps(research_report.get('binding_site',{}), ensure_ascii=False)}"
+                f"(基因: {research_report.get('gene_symbol','?')}, "
+                f"类型: {research_report.get('target_macromolecule_type','?')}, "
+                f"物种: {research_report.get('target_organism','?')})\n\n"
+                f"### 调研报告全文\n{research_report.get('full_report_text','')[:3000]}"
             )
 
         def fmt_strategy(s: dict, label: str) -> str:
@@ -144,37 +143,53 @@ class RedTeamReviewer:
 劣势: {s.get('weaknesses',[])}"""
 
         prompt = f"""\
-## 靶点深度调研报告
-{report_text[:5000]}
+## 调研报告摘要
+{report_text[:3000]}
 
-## 候选策略
 {fmt_strategy(strategy_a, '策略A')}
-
 {fmt_strategy(strategy_b, '策略B')}
 
-## 评审要求
-三位专家 (药化老兵/漏斗终结者/靶点专家) 分别评审两个策略。
-每位专家必须引用调研报告中的发现, 并给出 agreement 分数。
-"""
+三位专家分别评审。引用调研报告具体发现。输出完整JSON (所有字段必填)。"""
 
         try:
             is_reasoner = "reasoner" in self.model.lower()
             kwargs = dict(model=self.model, max_tokens=self.max_tokens,
                           messages=[{"role":"system","content":RED_TEAM_PROMPT},
                                     {"role":"user","content":prompt},
-                                    {"role":"system","content":f"必须输出纯JSON:\n{json.dumps(DebateOutput.model_json_schema(),indent=2,ensure_ascii=False)}"}])
+                                    {"role":"system","content":"输出JSON。每专家attack_points至少4条。格式:{\"debate_summary\":\"...\",\"attacks_on_a\":[{\"persona\":\"...\",\"persona_name\":\"...\",\"focus_area\":\"...\",\"attack_points\":[\"p1\",\"p2\"],\"severity\":\"major\",\"agreement\":0.6,\"suggested_fixes\":[\"f1\"],\"reference_to_report\":\"...\"}],\"attacks_on_b\":[...]}"}])
             if not is_reasoner: kwargs.update(temperature=self.temperature, response_format={"type":"json_object"})
             resp = self.client.chat.completions.create(**kwargs)
             raw = resp.choices[0].message.content
             if not raw or not raw.strip():
                 raw = getattr(resp.choices[0].message, "reasoning_content", "") or ""
-                if "{" in raw: raw = raw[raw.rfind("{"):]
-            d = DebateOutput.model_validate(json.loads(raw.strip()))
+                if "{" in raw: raw = raw[raw.find("{"):]
+            parsed = self._robust_json_parse(raw.strip())
+            d = DebateOutput.model_validate(parsed)
             return {"attacks_on_a": [a.model_dump() for a in d.attacks_on_a],
                     "attacks_on_b": [a.model_dump() for a in d.attacks_on_b],
                     "debate_summary": d.debate_summary}
         except Exception as e:
             return self._fallback(strategy_a, strategy_b, str(e))
+
+    @staticmethod
+    def _robust_json_parse(raw: str) -> Dict[str, Any]:
+        """多层JSON修复。"""
+        try: return json.loads(raw)
+        except json.JSONDecodeError: pass
+        cleaned = raw
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r'^```\w*\n', '', cleaned)
+            cleaned = re.sub(r'\n```$', '', cleaned)
+        try: return json.loads(cleaned)
+        except json.JSONDecodeError: pass
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                decoder = json.JSONDecoder()
+                result, _ = decoder.raw_decode(cleaned[start:end+1])
+                return result
+            except json.JSONDecodeError: pass
+        return {}
 
     def _fallback(self, sa: dict, sb: dict, err: str) -> Dict[str, Any]:
         def basic(persona, pname, focus):
