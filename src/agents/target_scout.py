@@ -1001,6 +1001,7 @@ class TargetScoutAgent:
                 log.append(f"  Track1(UniProt:{uniprot_id}): {len(uniprot_pdb_ids)} structures")
 
             # ── 轨道2: 文字搜索 (非核酸的fallback/补充) ──
+            base_name = search_term  # 初始化, 核酸靶点时也需此变量
             if not is_nucleic:
                 import re as _re
                 mutation = intent.get("modification", "")

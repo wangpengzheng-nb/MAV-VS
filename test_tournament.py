@@ -8,12 +8,12 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 YOUR_QUERY = "基于靶点bcl-2去筛选一个抗衰老药物，要求其具有高选择性，不能作用于bcl-xl，且具有良好的ADMET性质。"
-SKIP_RESEARCH = True  # 跳过Step0, 从已有文件加载
-SKIP_STRATEGY = True  # 跳过Step0-1, 从已有文件加载
+SKIP_RESEARCH = False  # 跳过Step0, 从已有文件加载
+SKIP_STRATEGY = False  # 跳过Step0-1, 从已有文件加载
 LOAD_STRATEGIES_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb/strategies"
 RESEARCH_REPORT_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb"
 SWISS_ROUNDS = 4
-SKIP_EVALUATION = True   # 跳过Step2-3, 从已有文件加载
+SKIP_EVALUATION = False   # 跳过Step2-3, 从已有文件加载
 LOAD_FROM_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb"  # 已有任务目录
 EVOLVE_TOP_N = 3         # Step 4: 进化前N名, 0=跳过进化
 

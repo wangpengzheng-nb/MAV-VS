@@ -1,13 +1,37 @@
-# 忽略环境变量文件
+# ── 敏感信息 ──
 .env
+.env.*
+*.key
+*.pem
+config/prompts.yaml
 
-# 忽略 Python 缓存和虚拟环境
+# ── Python 缓存和虚拟环境 ──
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
 venv/
 env/
 .venv/
 
-# 忽略 VS Code 配置文件
+# ── IDE / 编辑器 ──
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Claude / AI 内部文件 ──
+.claude/
+.specify/
+
+# ── 运行时输出 ──
 分析文件/
+*.log
+*.tmp
+
+# ── Web 应用 ──
+web_app/__pycache__/

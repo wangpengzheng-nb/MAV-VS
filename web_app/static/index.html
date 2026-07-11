@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoVS-Agent — 虚拟筛选智能体</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+
+  <!-- 头部 -->
+  <header>
+    <h1>🧬 AutoVS-Agent</h1>
+    <p class="subtitle">AI 驱动的自动化虚拟筛选智能体系统</p>
+  </header>
+
+  <!-- 输入区 -->
+  <section class="input-section" id="inputSection">
+    <div class="input-wrapper">
+      <textarea id="queryInput" rows="3"
+        placeholder="请输入虚拟筛选任务，例如：&#10;寻找针对突变型IDH1(R132H)的变构抑制剂&#10;筛选能够同时激活核受体NURR1并抑制单胺氧化酶MAO-B的双靶点分子，用于帕金森病"></textarea>
+      <button id="runBtn" onclick="startPipeline()">
+        <span class="btn-icon">🚀</span> 开始虚拟筛选
+      </button>
+    </div>
+  </section>
+
+  <!-- 进度条 -->
+  <section class="progress-section" id="progressSection" style="display:none">
+    <h3>运行进度</h3>
+    <div class="progress-track">
+      <div class="progress-nodes" id="progressNodes">
+        <div class="pnode" data-step="靶点调研">
+          <div class="pdot">1</div>
+          <span>靶点调研</span>
+        </div>
+        <div class="pconnector"><div class="pfill"></div></div>
+        <div class="pnode" data-step="策略生成">
+          <div class="pdot">2</div>
+          <span>策略生成</span>
+        </div>
+        <div class="pconnector"><div class="pfill"></div></div>
+        <div class="pnode" data-step="策略审评">
+          <div class="pdot">3</div>
+          <span>策略审评</span>
+        </div>
+        <div class="pconnector"><div class="pfill"></div></div>
+        <div class="pnode" data-step="策略进化">
+          <div class="pdot">4</div>
+          <span>策略进化</span>
+        </div>
+        <div class="pconnector"><div class="pfill"></div></div>
+        <div class="pnode" data-step="输出结果">
+          <div class="pdot">5</div>
+          <span>输出结果</span>
+        </div>
+      </div>
+    </div>
+    <div class="progress-status" id="progressStatus">
+      <span class="pct" id="pctText">0%</span>
+      <span class="msg" id="stepMsg">准备中...</span>
+    </div>
+  </section>
+
+  <!-- 结果区 -->
+  <section class="result-section" id="resultSection" style="display:none">
+    <div class="result-tabs">
+      <button class="tab active" onclick="switchTab('report')">📋 调研报告</button>
+      <button class="tab" onclick="switchTab('strategies')">🧬 进化策略</button>
+      <button class="tab" onclick="switchTab('ranking')">🏆 策略排名</button>
+    </div>
+
+    <!-- 调研报告 -->
+    <div class="tab-content active" id="tab-report">
+      <div class="report-view" id="reportContent"></div>
+    </div>
+
+    <!-- 进化策略 -->
+    <div class="tab-content" id="tab-strategies">
+      <div class="strategies-list" id="strategiesList"></div>
+    </div>
+
+    <!-- 排名 -->
+    <div class="tab-content" id="tab-ranking">
+      <div class="ranking-view" id="rankingContent"></div>
+    </div>
+  </section>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
