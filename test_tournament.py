@@ -199,217 +199,123 @@ def run_test():
     if len(strategies) < 2:
         print("  ⚠️ 需要至少2个策略"); return
 
-    # ── Step 2-3: 评审+锦标赛 ──
-    from src.agents.expert_committee import TournamentReviewer
-    from src.agents.judge_agent import StrategyJudge
+    # ── Step 2: 策略审评 (全排列 pairwise 投票) ──
+    hdr("Step 2: 策略审评 (全排列 pairwise 投票)")
+    from src.agents.expert_committee import TournamentReviewer, REVIEWER_CONFIGS
+    from src.agents.judge_agent import VoteAggregator
+    import itertools
 
     reviewer = TournamentReviewer()
-    review_results = {}
-    elo = {}
-    ranked = []
-    tournament_records = []
+    aggregator = VoteAggregator()
 
-    if SKIP_EVALUATION and LOAD_FROM_DIR:
-        hdr("Step 2-3: 加载已有评审和锦标赛结果")
-        review_dir = os.path.join(LOAD_FROM_DIR, "reviews")
-        if os.path.isdir(review_dir):
-            for fname in os.listdir(review_dir):
-                with open(os.path.join(review_dir, fname), "r", encoding="utf-8") as f:
-                    r = json.load(f)
-                review_results[r["strategy_name"]] = r
-            print(f"  ⏩ 加载 {len(review_results)} 个评审")
-        tr_file = os.path.join(LOAD_FROM_DIR, "tournament_results.json")
-        total_matches = 0
-        if os.path.exists(tr_file):
-            with open(tr_file, "r", encoding="utf-8") as f:
-                tr = json.load(f)
-            elo = tr.get("elo_final", {})
-            ranked = tr.get("ranking", [])
-            tournament_records = tr.get("records", [])
-            total_matches = tr.get("total_matches", len(tournament_records))
-            for name, score in tr.get("independent_scores", {}).items():
-                if name not in review_results:
-                    review_results[name] = {"weighted_score": score, "reports": [], "all_critical_flaws": []}
-            print(f"  ⏩ 加载锦标赛: {len(ranked)}排名, {len(tournament_records)}场判例")
-        print(f"\n  📊 已有排名:")
-        for rank, (name, esc) in enumerate(ranked, 1):
-            emoji = "🥇" if rank==1 else "🥈" if rank==2 else "🥉" if rank==3 else "  "
-            init_score = review_results.get(name, {}).get("weighted_score", "?")
-            print(f"  {emoji} {rank}. {name[:55]}  评分={init_score:.1f} | Elo={esc:.0f}")
-    else:
-        hdr("Step 2: 三人设独立评审")
-        for i, s in enumerate(strategies, 1):
-            print(f"\n  [{i}/{len(strategies)}]", end="", flush=True)
-            rr = reviewer.review_strategy(s, report, YOUR_QUERY, prior_knowledge=PRIOR_KNOWLEDGE)
-            review_results[s["strategy_name"]] = rr
-        review_results = reviewer.calibrate_all(review_results, strategies, report, YOUR_QUERY)
-        print(f"\n\n  📊 独立评分排名(校准后):")
-        sorted_by_score = sorted(review_results.items(), key=lambda x: x[1]["weighted_score"], reverse=True)
-        for rank, (name, rr) in enumerate(sorted_by_score, 1):
-            emoji = "🥇" if rank==1 else "🥈" if rank==2 else "🥉" if rank==3 else "  "
-            flaws = len(rr.get("all_critical_flaws",[]))
-            print(f"  {emoji} {rank}. {name[:55]}  {rr['weighted_score']:.1f}分"
-                  f"{' ⚠️'+str(flaws)+'致命缺陷' if flaws else ''}")
-        scores = [rr["weighted_score"] for rr in review_results.values()]
-        score_range = max(scores) - min(scores)
-        mean_score = sum(scores) / len(scores)
-        std_dev = math.sqrt(sum((s-mean_score)**2 for s in scores)/len(scores))
-        print(f"\n  📊 分数统计: 范围={score_range:.1f} | 均值={mean_score:.1f} | 标准差={std_dev:.1f}")
+    # 全排列配对
+    n = len(strategies)
+    pairs = list(itertools.combinations(range(n), 2))
+    total_matches = len(pairs) * len(REVIEWER_CONFIGS)
+    print(f"  🏟️  {n}策略 × C({n},2)={len(pairs)}对 × {len(REVIEWER_CONFIGS)}评审官 = {total_matches}次投票")
+    print(f"  📊 并发控制: 最大10并发 + 自动重试3次")
 
-        hdr("Step 3: 瑞士制锦标赛")
-        for name, rr in review_results.items():
-            elo[name] = StrategyJudge.compute_initial_elo(rr)
-        init_elo = dict(elo)
-        total_matches = 0
-        judge = StrategyJudge()
-        history = set()
-        for rn in range(1, SWISS_ROUNDS + 1):
-            pairings = swiss_pairings(strategies, elo, history)
-            if not pairings: break
-            print(f"\n  ── 第{rn}轮 ({len(pairings)}场) ──")
-            for na, nb in pairings:
-                sa = next(s for s in strategies if s["strategy_name"] == na)
-                sb = next(s for s in strategies if s["strategy_name"] == nb)
-                ra, rb = review_results.get(na, {}), review_results.get(nb, {})
-                verdict = judge.judge_match(sa, sb, ra, rb, report, YOUR_QUERY)
-                winner = verdict.get("winner", ""); total_matches += 1
-                if winner and winner != "tie":
-                    loser = nb if winner == na else na
-                    _, _, elo = StrategyJudge.update_elo(elo, winner, loser, False)
-                elif winner == "tie":
-                    _, _, elo = StrategyJudge.update_elo(elo, na, nb, True)
-                print(f"    {na[:28]} vs {nb[:28]} → "
-                      f"{'tie' if winner=='tie' else winner[:40]} | "
-                      f"conf={verdict.get('confidence',.5):.0%}")
-                tournament_records.append({"round": rn, "strategy_a": na,
-                    "strategy_b": nb, "verdict": verdict})
-            max_shift = max(abs(elo[n]-init_elo.get(n,elo[n])) for n in elo) if init_elo else 0
-            if rn >= 3 and max_shift < 5: break
+    # 同步执行(简化版, 不用asyncio): 逐对评审, 每对的3个评审官并行
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tenacity import retry, stop_after_attempt, wait_exponential
 
-        hdr("🏆 最终排名")
-        ranked = sorted(elo.items(), key=lambda x: x[1], reverse=True)
-
-    for rank, (name, esc) in enumerate(ranked, 1):
-        emoji = "🥇" if rank==1 else "🥈" if rank==2 else "🥉" if rank==3 else "  "
-        init_score = review_results.get(name, {}).get("weighted_score", "?")
+    def review_one_pair_with_retry(rid, mid, sa, sb):
+        @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
+        def _call():
+            return reviewer.compare_strategies(sa, sb, report, YOUR_QUERY,
+                                               PRIOR_KNOWLEDGE, reviewer_id=rid, match_id=mid)
         try:
-            change = esc - init_elo[name]
-        except (NameError, KeyError):
-            change = 0
-        print(f"  {emoji} {rank}. {name[:55]}")
-        print(f"     独立评分={init_score:.1f} | Elo={esc:.0f} "
-              f"({'↑'+str(int(change)) if change>0 else '↓'+str(int(-change)) if change<0 else '—'})")
+            return _call()
+        except Exception as e:
+            print(f"    ❌ [{rid}] 重试3次后仍失败: {e}", flush=True)
+            return {"reviewer_id": rid, "match_id": mid, "overall_verdict": "tie",
+                    "verdict_confidence": "low", "dimension_votes": [],
+                    "critical_concerns": {}, "suggestions": {}, "decision_logic": f"失败: {e}"}
 
-    # ── Step 4: 策略进化 + 迷你锦标赛验证 ──
-    if EVOLVE_TOP_N > 0 and len(strategies) >= 3:
-        hdr("Step 4: 策略进化 + 迷你锦标赛验证")
+    for pi, (i, j) in enumerate(pairs):
+        sa, sb = strategies[i], strategies[j]
+        na, nb = sa["strategy_name"], sb["strategy_name"]
+        mid = f"{na[:20]}_vs_{nb[:20]}"
+        print(f"\n  [{pi+1}/{len(pairs)}] {na[:30]} vs {nb[:30]}", end="", flush=True)
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(review_one_pair_with_retry, cfg["id"], mid, sa, sb): cfg
+                    for cfg in REVIEWER_CONFIGS}
+            for fut in as_completed(futs):
+                result = fut.result()
+                aggregator.add_result(result)
+                vid = result.get("reviewer_id", "?")
+                vv = result.get("overall_verdict", "tie")
+                conf = result.get("verdict_confidence", "?")
+                print(f"\n    [{vid}] → {vv} (conf={conf})", end="", flush=True)
+
+    # ── Step 3: 统票 + 排名 + 诊断 ──
+    hdr("Step 3: 统票 + 排名 + 诊断报告")
+    ranking = aggregator.rank(strategies)
+    diagnostics = aggregator.generate_diagnostic(top_n=3)
+
+    print(f"\n  🏆 最终排名:")
+    for r in ranking:
+        emoji = "🥇" if r['rank']==1 else "🥈" if r['rank']==2 else "🥉" if r['rank']==3 else "  "
+        print(f"  {emoji} {r['rank']}. {r['strategy_name'][:55]}")
+        print(f"     得票: {r['total_votes']:.1f} | 胜{r['wins']}负{r['losses']}平{r['draws']} | "
+              f"Fatal:{r['fatal_count']} High:{r['high_suggestions']}")
+
+    print(f"\n  📊 Top 3 诊断报告(输入进化智能体):")
+    for d in diagnostics:
+        concerns = len(d['aggregated_concerns'])
+        suggs = len(d['aggregated_suggestions'])
+        print(f"\n  [{d['strategy_name'][:50]}]")
+        print(f"    致命/警告: {concerns}条  |  建议: {suggs}条")
+        if d['dimension_strengths']:
+            print(f"    优势维度: {', '.join(d['dimension_strengths'][:3])}")
+        if d['dimension_weaknesses']:
+            print(f"    劣势维度: {', '.join(d['dimension_weaknesses'][:3])}")
+
+    ranked_names = [(r['strategy_name'], r['total_votes']) for r in ranking]
+
+    # ── Step 4: 策略进化 (基于诊断报告) ──
+    if EVOLVE_TOP_N > 0 and len(strategies) >= 3 and diagnostics:
+        hdr("Step 4: 策略进化 (基于诊断报告)")
         from src.agents.strategy_evolver import StrategyEvolver
 
         evolver = StrategyEvolver()
+        # 用诊断报告替代旧的 review_results
+        diagnostic_map = {d["strategy_name"]: d for d in diagnostics}
         evolved_strategies = evolver.evolve_top_n(
-            strategies, review_results, tournament_records,
-            report, YOUR_QUERY, n=EVOLVE_TOP_N, prior_knowledge=PRIOR_KNOWLEDGE)
+            strategies, diagnostic_map, [],
+            report, YOUR_QUERY, n=min(EVOLVE_TOP_N, len(diagnostics)),
+            prior_knowledge=PRIOR_KNOWLEDGE)
 
         evo_dir = os.path.join(TASK_DIR, "evolved_strategies")
         os.makedirs(evo_dir, exist_ok=True)
         for i, s in enumerate(evolved_strategies, 1):
             if "(v2" in s.get("strategy_name", ""):
-                sf = os.path.join(evo_dir,
-                    f"evolved_{i:02d}_{s['strategy_name'].replace('/','_').replace(':','_')[:60]}.md")
+                sf = os.path.join(evo_dir, f"evolved_{i:02d}_{s['strategy_name'][:50]}.md")
                 with open(sf, "w", encoding="utf-8") as f:
-                    f.write(f"# 进化策略 {i}: {s['strategy_name']}\n\n"
-                            f"**标签**: {s.get('strategy_tagline','')} | "
-                            f"**方法**: {s.get('approach_type','?')} | "
-                            f"**耗时**: {s.get('estimated_runtime','?')}\n\n")
-                    changelog = s.get('evolution_changelog', [])
-                    if changelog:
-                        f.write(f"## 进化日志\n" + "\n".join(f"- {c}" for c in changelog) + "\n\n")
-                    f.write(f"## 原理\n{s.get('rationale','')}\n\n## 步骤\n")
-                    for st in s.get("pipeline_steps", []):
-                        f.write(f"### Step {st.get('step_number','?')}: {st.get('step_name','?')}\n"
-                                f"| 工具 | 指标 | 阈值 |\n|---|---|---|\n"
-                                f"| {st.get('tool','?')} | {st.get('metric','?')} | {st.get('threshold','?')} |\n\n"
-                                f"**操作**: {st.get('action','?')}\n\n**理由**: {st.get('rationale','?')}\n\n")
-                    f.write(f"**存活**: {s.get('survival_estimate','?')}\n\n"
-                            f"**应急**: {s.get('contingency','?')}\n\n"
-                            f"## 优势\n" + "\n".join(f"- {x}" for x in s.get('strengths',[])) + "\n\n"
-                            f"## 劣势\n" + "\n".join(f"- {x}" for x in s.get('weaknesses',[])) + "\n")
+                    f.write(f"# 进化策略 {i}: {s['strategy_name']}\n\n")
+                    for c in s.get('evolution_changelog', []): f.write(f"- {c}\n")
+                    f.write(f"\n## 原理\n{s.get('rationale','')}\n")
         print(f"  📁 {evo_dir}/")
+    else:
+        evolved_strategies = strategies
 
-        evo_names = [s["strategy_name"] for s in evolved_strategies
-                     if "(v2" in s.get("strategy_name", "")]
-        if evo_names and len(evo_names) >= 1:
-            orig_top = [ranked[i][0] for i in range(min(EVOLVE_TOP_N, len(ranked)))]
-            orig_strategies = [s for s in strategies if s["strategy_name"] in orig_top]
-            evo_strategies_only = [s for s in evolved_strategies if s["strategy_name"] in evo_names]
-            mini_strategies = orig_strategies + evo_strategies_only
-            print(f"\n  🏟️  迷你锦标赛: {len(mini_strategies)}策略 "
-                  f"({len(orig_strategies)}原始 + {len(evo_strategies_only)}进化)", flush=True)
+    # 保存评审结果
+    review_dir = os.path.join(TASK_DIR, "reviews")
+    os.makedirs(review_dir, exist_ok=True)
+    with open(os.path.join(review_dir, "all_votes.json"), "w", encoding="utf-8") as f:
+        json.dump({"results": aggregator.results, "ranking": ranking,
+                   "diagnostics": diagnostics}, f, ensure_ascii=False, indent=2)
 
-            judge = StrategyJudge()
-            mini_reviewer = TournamentReviewer()
-            mini_reviews = {}
-            for i, s in enumerate(mini_strategies, 1):
-                print(f"  [{i}/{len(mini_strategies)}]", end="", flush=True)
-                rr = mini_reviewer.review_strategy(s, report, YOUR_QUERY, prior_knowledge=PRIOR_KNOWLEDGE)
-                mini_reviews[s["strategy_name"]] = rr
-            mini_reviews = mini_reviewer.calibrate_all(mini_reviews, mini_strategies, report, YOUR_QUERY)
-
-            mini_elo = {}
-            for name, rr in mini_reviews.items():
-                mini_elo[name] = StrategyJudge.compute_initial_elo(rr)
-            mini_history = set()
-            for rn in range(1, 4):
-                pairs = swiss_pairings(mini_strategies, mini_elo, mini_history)
-                if not pairs: break
-                for na, nb in pairs:
-                    sa = next(s for s in mini_strategies if s["strategy_name"] == na)
-                    sb = next(s for s in mini_strategies if s["strategy_name"] == nb)
-                    ra, rb = mini_reviews.get(na, {}), mini_reviews.get(nb, {})
-                    v = judge.judge_match(sa, sb, ra, rb, report, YOUR_QUERY)
-                    w = v.get("winner", "")
-                    if w and w != "tie":
-                        loser = nb if w == na else na
-                        _, _, mini_elo = StrategyJudge.update_elo(mini_elo, w, loser, False)
-                    elif w == "tie":
-                        _, _, mini_elo = StrategyJudge.update_elo(mini_elo, na, nb, True)
-
-            print(f"\n  📊 进化效果对比:")
-            for name in orig_top:
-                orig_score = review_results.get(name, {}).get("weighted_score", 0)
-                evo_name = next((en for en in evo_names if name in en), None)
-                evo_score = mini_reviews.get(evo_name, {}).get("weighted_score", 0) if evo_name else 0
-                evo_elo = mini_elo.get(evo_name, 0) if evo_name else 0
-                orig_elo_val = elo.get(name, 0)
-                if evo_name:
-                    delta = evo_score - orig_score
-                    arrow = '↑' if delta > 0 else ('↓' if delta < 0 else '—')
-                    print(f"  {name[:40]} → {evo_name[:40]}")
-                    print(f"    评分: {orig_score:.1f} → {evo_score:.1f} "
-                          f"({arrow}{abs(int(delta))}) | Elo: {orig_elo_val:.0f} → {evo_elo:.0f}")
-
-    # 保存结果
+    # 保存结果 (v4: 投票+诊断)
     result_file = os.path.join(TASK_DIR, "tournament_results.json")
     with open(result_file, "w", encoding="utf-8") as f:
-        json.dump({
-            "query": YOUR_QUERY,
-            "independent_scores": {k: v["weighted_score"] for k, v in review_results.items()},
-            "elo_final": elo, "ranking": [(n, e) for n, e in ranked],
-            "total_matches": total_matches, "swiss_rounds": SWISS_ROUNDS,
-            "records": tournament_records,
-        }, f, ensure_ascii=False, indent=2)
-    print(f"\n  📁 结果: {result_file}")
-
-    # 评审详情
-    detail_dir = os.path.join(TASK_DIR, "reviews")
-    os.makedirs(detail_dir, exist_ok=True)
-    for name, rr in review_results.items():
-        fname = name[:50].replace("/","_").replace(":","_")
-        with open(os.path.join(detail_dir, f"review_{fname}.json"), "w", encoding="utf-8") as f:
-            json.dump(rr, f, ensure_ascii=False, indent=2)
-    print(f"  📁 评审详情: {detail_dir}/")
-
-    print(f"\n{SEP}\n  ✅ {len(strategies)}策略 × {total_matches}场辩论 完成\n{SEP}")
+        json.dump({"query": YOUR_QUERY, "ranking": ranking,
+                   "diagnostics": diagnostics,
+                   "total_votes": len(aggregator.results),
+                   }, f, ensure_ascii=False, indent=2)
+    print(f"\n  Result: {result_file}  |  Reviews: {review_dir}/")
+    print(f"\n{SEP}\n  Done: {len(strategies)}x{len(pairs)}pairs x3={total_matches}votes\n{SEP}")
 
 if __name__ == "__main__":
     run_test()
