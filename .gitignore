@@ -33,6 +33,9 @@ env/
 *.log
 *.tmp
 
+# ── 向量数据库 ──
+分析文件/vectordb/
+
 # ── Web 应用 ──
 web_app/__pycache__/
 

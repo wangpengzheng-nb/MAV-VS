@@ -57,7 +57,12 @@ class StrategyGeneratorAgent:
         return self._client
 
     def generate_strategies(self, research_report: dict, target_info=None, prior_knowledge: str = ""):
-        report_text = research_report.get("full_report_text", "")
+        # 🆕 优先使用执行摘要, 否则 fallback 到完整报告
+        summary = research_report.get("executive_summary", "")
+        if summary:
+            report_text = summary
+        else:
+            report_text = research_report.get("full_report_text", "")
         if not report_text:
             report_text = json.dumps(research_report, ensure_ascii=False, indent=2)
 
@@ -65,13 +70,16 @@ class StrategyGeneratorAgent:
         target_gene = research_report.get("gene_symbol", "")
         target_uniprot = research_report.get("uniprot_id", "")
 
+        # 🆕 向量数据库路径
+        vector_db_path = research_report.get("_vector_db_path", "")
+
         user_query = research_report.get("_user_query", "")
         prompt = self._build_strategy_prompt(target_name, target_gene, target_uniprot,
                                               report_text, user_query, prior_knowledge)
 
         # 最多重试3次, 每次打印失败原因
         for attempt in range(3):
-            strategies, raw_json = self._call_llm(prompt, target_name, target_gene)
+            strategies, raw_json = self._call_llm(prompt, target_name, target_gene, vector_db_path)
             if strategies and len(strategies) >= 3:
                 return {"strategies": strategies, "generation_rationale": f"成功生成{len(strategies)}个策略 (第{attempt+1}次调用)"}
             print(f"\n⚠️ 策略生成第{attempt+1}次: {len(strategies) if strategies else 0}个策略。原始响应{len(raw_json)}字符", flush=True)
@@ -80,7 +88,7 @@ class StrategyGeneratorAgent:
 
         # 3次都失败: 简化prompt再试
         simple_prompt = f"""为靶点{target_name}({target_gene})设计5个虚拟筛选策略。输出JSON。"""
-        strategies, _ = self._call_llm(simple_prompt, target_name, target_gene)
+        strategies, _ = self._call_llm(simple_prompt, target_name, target_gene, vector_db_path)
         if strategies and len(strategies) >= 3:
             return {"strategies": strategies, "generation_rationale": "简化prompt重试成功"}
 
@@ -252,18 +260,66 @@ class StrategyGeneratorAgent:
 
         return "\n".join(lines) + "\n"
 
-    def _call_llm(self, prompt, target_name="", target_gene=""):
+    def _call_llm(self, prompt, target_name="", target_gene="", vector_db_path=""):
         raw = ""
         try:
             is_reasoner = "reasoner" in self.model.lower()
-            kwargs = dict(model=self.model, max_tokens=self.max_tokens,
-                          messages=[{"role":"system","content":f"你是虚拟筛选策略专家。为{target_name}({target_gene})设计策略。核心规则: 1)如果用户原始query包含'不要X/禁止X/避开X',策略中必须有对应排除步骤 2)如果调研报告列出了PDB结构,必须推荐使用它们,禁止说'无实验结构' 3)禁止生成SBDD/LBDD/ML/片段/共价固定模板,必须基于靶点特异性数据定制每个策略 4)approach_type自由描述,不限于固定枚举 5)输出纯JSON,所有字段必填,阈值给基于报告的数值"},
-                                    {"role":"user","content":prompt}])
-            if not is_reasoner: kwargs.update(temperature=self.temperature, response_format={"type":"json_object"})
-            resp = self.client.chat.completions.create(**kwargs)
-            raw = resp.choices[0].message.content or ""
-            if not raw.strip():
-                raw = getattr(resp.choices[0].message, "reasoning_content", "") or ""
+
+            messages = [
+                {"role":"system","content":f"你是虚拟筛选策略专家。为{target_name}({target_gene})设计策略。核心规则: 1)用户query中'不要X/禁止X/避开X'→有排除步骤 2)PDB结构→推荐使用 3)禁止固定模板,基于靶点特异性定制 4)approach_type自由描述 5)输出纯JSON,阈值给基于报告的数值。如有不确定的数据,使用search_research_db工具查询。"},
+                {"role":"user","content":prompt},
+            ]
+
+            # 🆕 Tool calling loop
+            tools = None
+            if vector_db_path:
+                from src.tools.vector_store import ResearchVectorStore, SEARCH_TOOL_SCHEMA, set_research_vs
+                try:
+                    vs = ResearchVectorStore(vector_db_path)
+                    set_research_vs(vs)
+                    tools = [SEARCH_TOOL_SCHEMA]
+                except Exception:
+                    pass  # 向量库不可用时优雅降级
+
+            for _ in range(5):  # 最多5轮tool call
+                kwargs = dict(model=self.model, max_tokens=self.max_tokens, messages=messages)
+                if not is_reasoner:
+                    kwargs["temperature"] = self.temperature
+                    kwargs["response_format"] = {"type":"json_object"}
+                if tools:
+                    kwargs["tools"] = tools
+                    kwargs["tool_choice"] = "auto"
+
+                resp = self.client.chat.completions.create(**kwargs)
+                msg = resp.choices[0].message
+
+                # 检查是否有 tool calls
+                if tools and msg.tool_calls:
+                    messages.append(msg)  # 添加 assistant message with tool calls
+                    for tc in msg.tool_calls:
+                        if tc.function.name == "search_research_db":
+                            args = json.loads(tc.function.arguments)
+                            query = args.get("query", "")
+                            print(f"    🔍 策略生成器查询向量库: {query[:60]}...", flush=True)
+                            from src.tools.vector_store import _get_vs
+                            vs2 = _get_vs()
+                            if vs2:
+                                result_text = vs2.search_formatted(query, top_k=3)
+                            else:
+                                result_text = "向量数据库不可用"
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": result_text,
+                            })
+                    continue  # 继续下一轮
+
+                # 正常的文本响应
+                raw = msg.content or ""
+                if not raw.strip():
+                    raw = getattr(msg, "reasoning_content", "") or ""
+                break  # 拿到最终响应, 退出循环
+
             if "{" in raw: raw = raw[raw.find("{"):]
             parsed = self._robust_parse(raw.strip())
             items = parsed.get("strategies", [])

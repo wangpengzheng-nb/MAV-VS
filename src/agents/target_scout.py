@@ -1348,7 +1348,90 @@ class TargetScoutAgent:
             report["druggability_assessment"] = ""
             report["known_ligands_text"] = ""
         report["_search_log"] = log
+
+        # ── 🆕 Step 7: 写入向量数据库 + 生成执行摘要 ──
+        try:
+            from src.tools.vector_store import ResearchVectorStore
+            import hashlib as _hl
+            # 向量库路径: 分析文件/vectordb/{task_hash}/
+            vdb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))), "分析文件", "vectordb",
+                _hl.md5(query.encode()).hexdigest()[:12])
+            os.makedirs(vdb_dir, exist_ok=True)
+            vs = ResearchVectorStore(vdb_dir)
+
+            # 写入各 API 数据
+            if uniprot_data:
+                vs.store_uniprot(uniprot_data)
+            if verified_pdbs:
+                vs.store_pdb(verified_pdbs)
+            if chembl_activities:
+                vs.store_chembl(chembl_activities)
+            if pubmed_papers:
+                vs.store_pubmed(pubmed_papers)
+            if clinical_trials:
+                vs.store_clinical(clinical_trials)
+            # 完整报告分块存储
+            full_text = report.get("full_report_text", "")
+            if full_text:
+                vs.store_full_report(full_text)
+
+            # 生成执行摘要 (~6000 tokens)
+            summary = self._generate_summary(
+                target_name=report.get("target_name", gene_symbol or "Unknown"),
+                gene=gene_symbol or gene,
+                full_text=full_text[:15000],  # 传入前15000字符
+            )
+            report["executive_summary"] = summary
+            report["_vector_db_path"] = vdb_dir
+            log.append(f"VectorDB: stored in {vdb_dir}")
+            log.append(f"Summary: {len(summary)} chars")
+        except Exception as e:
+            log.append(f"VectorDB/Summary error: {e}")
+            report["executive_summary"] = report.get("full_report_text", "")[:6000]
+
         return report
+
+    def _generate_summary(self, target_name: str, gene: str,
+                           full_text: str) -> str:
+        """生成执行摘要 (~6000 tokens), 保留关键数据, 压缩冗长描述。"""
+        if not full_text:
+            return ""
+
+        is_reasoner = "reasoner" in self.model.lower()
+        prompt = f"""请为靶点 {target_name} ({gene}) 生成一份虚拟筛选执行摘要。
+
+## 要求
+- 控制在 6000 tokens 以内 (~4000汉字)
+- 包含4个部分: 靶点生物学、结构生物学、已知配体、可药性评估
+- 保留所有关键数字: PDB ID、分辨率、IC50/Ki/Kd值、口袋体积、关键残基名
+- 删除冗长的背景描述、重复语句、文献引用编号
+- 使用简洁的列表和表格代替长段落
+- 确保策略生成智能体仅凭此摘要就能获得足够的靶点信息
+
+## 原始报告
+{full_text}
+
+输出纯文本, 不要JSON包装, 4个章节用 ## 标题分隔。"""
+
+        try:
+            kwargs = dict(model=self.model, max_tokens=4096,
+                          messages=[{"role":"system","content":"你是药物研发报告编辑专家。任务是将长篇靶点调研报告压缩为精炼的执行摘要，保留所有关键数据点。输出纯文本。"},
+                                    {"role":"user","content":prompt}])
+            if not is_reasoner:
+                kwargs["temperature"] = 0.2
+            resp = self.client.chat.completions.create(**kwargs)
+            raw = (resp.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = re.sub(r'^```\w*\n?', '', raw)
+                raw = re.sub(r'\n?```$', '', raw)
+            finish = getattr(resp.choices[0], "finish_reason", "stop")
+            if finish == "length":
+                print(f"  ⚠️ 摘要生成被截断", flush=True)
+            return raw
+        except Exception as e:
+            print(f"  ⚠️ 摘要生成失败: {e}", flush=True)
+            return full_text[:6000]
 
     @staticmethod
     def _build_api_fallback(target_name, uniprot_data, verified_pdbs,
