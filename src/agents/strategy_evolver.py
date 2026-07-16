@@ -69,7 +69,7 @@ class StrategyEvolver:
 
     def evolve_top_n(self, strategies: list, review_results: dict,
                      tournament_records: list, research_report: dict,
-                     user_query: str, n: int = 3) -> list:
+                     user_query: str, n: int = 3, prior_knowledge: str = "") -> list:
         """对Top-N策略进行进化。
 
         Args:
@@ -101,7 +101,7 @@ class StrategyEvolver:
             verdict_weaknesses = self._extract_verdict_weaknesses(name, tournament_records)
 
             evo = self.evolve_strategy(s, rr, verdict_weaknesses,
-                                       research_report, user_query)
+                                       research_report, user_query, prior_knowledge)
             if evo:
                 evolved[name] = evo
                 print(f"    ✅ {name[:40]} → {evo.get('strategy_name','?')[:40]}", flush=True)
@@ -119,7 +119,7 @@ class StrategyEvolver:
 
     def evolve_strategy(self, strategy: dict, review_result: dict,
                         verdict_weaknesses: list, research_report: dict,
-                        user_query: str) -> Optional[dict]:
+                        user_query: str, prior_knowledge: str = "") -> Optional[dict]:
         """对单个策略进行定向进化。
 
         Args:
@@ -140,7 +140,7 @@ class StrategyEvolver:
             return None
 
         prompt = self._build_evolution_prompt(strategy, all_weaknesses,
-                                               research_report, user_query)
+                                               research_report, user_query, prior_knowledge)
 
         try:
             is_reasoner = "reasoner" in self.model.lower()
@@ -277,11 +277,15 @@ class StrategyEvolver:
     # =========================================================================
 
     def _build_evolution_prompt(self, strategy: dict, weaknesses: list,
-                                 research_report: dict, user_query: str) -> str:
+                                 research_report: dict, user_query: str,
+                                 prior_knowledge: str = "") -> str:
         parts = []
 
         if user_query:
-            parts.append(f"## 用户原始任务\n{user_query}\n")
+            parts.append(f"## 用户原始任务（操作细节必须保留！）\n{user_query}\n")
+
+        if prior_knowledge and prior_knowledge.strip():
+            parts.append(f"## 🧠 领域先验知识（进化时也必须遵守！）\n{prior_knowledge.strip()}\n")
 
         # 策略原文
         parts.append(f"## 原始策略\n")

@@ -188,6 +188,8 @@ REVIEWER_REQUIREMENT_PROMPT = """\
 □ 是否提到了关键残基(调研报告中的氢键/疏水/选择性残基)? (未提→扣5)
 □ 如果靶点有共晶结构 — 策略是否推荐使用而非建议同源建模? (用错→扣10)
 □ 如果靶点无实验结构 — 策略是否正确说明替代方案(同源建模/AF2)? (未说明→扣5)
+□ 策略是否使用了用户指定的库来源/库大小, 而非擅自改用 ZINC/Enamine? (擅自改库→扣10)
+□ 策略是否遵守了先验知识中的工具选择规则? (如PPI用Diffdock/其他用gnina→违反扣15)
 
 ## 输出格式
 严格输出JSON:
@@ -338,7 +340,7 @@ class TournamentReviewer:
     # =========================================================================
 
     def review_strategy(self, strategy: dict, research_report: dict,
-                        user_query: str = "") -> Dict[str, Any]:
+                        user_query: str = "", prior_knowledge: str = "") -> Dict[str, Any]:
         """三位评审官各自独立评审一个策略。
 
         Returns:
@@ -353,8 +355,8 @@ class TournamentReviewer:
                 "all_critical_flaws": [...],
             }
         """
-        # 构建上下文: 调研报告 + 用户任务
-        context = self._build_context(research_report, user_query, strategy)
+        # 构建上下文: 调研报告 + 用户任务 + 先验知识
+        context = self._build_context(research_report, user_query, strategy, prior_knowledge)
 
         # 并行评审
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -529,11 +531,14 @@ class TournamentReviewer:
     # =========================================================================
 
     def _build_context(self, research_report: dict, user_query: str,
-                       strategy: dict) -> str:
+                       strategy: dict, prior_knowledge: str = "") -> str:
         parts = []
 
         if user_query:
-            parts.append(f"## 用户原始任务\n{user_query}\n")
+            parts.append(f"## 用户原始任务（所有操作细节必须遵守！）\n{user_query}\n")
+
+        if prior_knowledge and prior_knowledge.strip():
+            parts.append(f"## 🧠 领域先验知识（必须遵守的专家规则！）\n{prior_knowledge.strip()}\n")
 
         # 调研报告关键信息
         target_name = research_report.get("target_name", "Unknown")

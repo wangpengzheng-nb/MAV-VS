@@ -56,7 +56,7 @@ class StrategyGeneratorAgent:
             self._client = OpenAI(api_key=self.api_key, base_url=f"{self.api_base}/v1")
         return self._client
 
-    def generate_strategies(self, research_report: dict, target_info=None):
+    def generate_strategies(self, research_report: dict, target_info=None, prior_knowledge: str = ""):
         report_text = research_report.get("full_report_text", "")
         if not report_text:
             report_text = json.dumps(research_report, ensure_ascii=False, indent=2)
@@ -67,7 +67,7 @@ class StrategyGeneratorAgent:
 
         user_query = research_report.get("_user_query", "")
         prompt = self._build_strategy_prompt(target_name, target_gene, target_uniprot,
-                                              report_text, user_query)
+                                              report_text, user_query, prior_knowledge)
 
         # 最多重试3次, 每次打印失败原因
         for attempt in range(3):
@@ -89,7 +89,7 @@ class StrategyGeneratorAgent:
             f"请检查调研报告是否完整, 或手动运行 test_tournament.py 查看详细日志。"
         )
 
-    def _build_strategy_prompt(self, target_name, target_gene, target_uniprot, report_text, user_query=""):
+    def _build_strategy_prompt(self, target_name, target_gene, target_uniprot, report_text, user_query="", prior_knowledge=""):
         metrics_block = self._build_metrics_block(report_text)
 
         # 🆕 从报告提取已验证PDB列表(防止LLM说"无实验结构")
@@ -99,16 +99,38 @@ class StrategyGeneratorAgent:
             unique_pdbs = list(dict.fromkeys(pdbs_in_report))[:8]
             pdb_note = f"\n⚠️ 调研报告已验证PDB结构包括: {', '.join(unique_pdbs)}。如果此列表非空, 禁止在策略中说'无实验结构'或建议'同源建模'! 必须推荐使用已验证的PDB进行对接!\n"
 
-        # 🆕 用户约束前置
+        # 🆕 用户约束前置 (强化版)
         constraint_block = ""
         if user_query:
-            constraint_block = f"""## 🚨 用户任务约束（策略必须严格遵守!）
+            constraint_block = f"""## 🚨 用户任务约束 — 必须逐条满足! (违反单项扣10分)
+
 {user_query}
 
-以上是用户原始要求。策略中的分子库选择、过滤条件、对接位点选择
-必须与用户描述一致。
-- 如果用户说"不要X/禁止X/避开X": 策略中必须有对应的排除/过滤步骤
-- 如果用户说"必须Y/要求Y": 策略中必须包含Y
+请从用户任务中提取所有操作细节, 逐条对照填入策略:
+1. **库来源**: 用户指定了什么化合物库? 库大小? → 必须使用用户指定的库! 禁止改用ZINC/Enamine!
+2. **口袋/靶点类型**: PPI? 激酶? 别构? → 必须匹配对应工具! PPI用Diffdock, 其他用gnina!
+3. **排除条件**: 用户说了"不要X/禁止X/避开X"? → 策略中必须有对应的排除/过滤步骤!
+4. **特殊要求**: 分子量范围? 选择性要求? ADMET? → 策略中必须明确体现!
+5. **数值约束**: 用户给了具体数值(库大小/MW/IC50)? → 策略阈值必须基于此, 禁止用泛化默认值!
+
+❌ 禁止: 忽略用户库来源改用ZINC/Enamine
+❌ 禁止: 忽略用户口袋类型用通用方法
+❌ 禁止: 用泛化默认值替代用户指定的数值
+
+---
+
+"""
+
+        # 🆕 先验知识块
+        prior_block = ""
+        if prior_knowledge and prior_knowledge.strip():
+            prior_block = f"""## 🧠 领域先验知识 (必须遵守的专家规则!)
+
+{prior_knowledge.strip()}
+
+以上是领域专家的先验知识。策略中的工具选择、方法设计必须遵守这些规则!
+- 如果先验知识指定了某种场景下的工具 → 策略中该场景必须使用该工具
+- 如果先验知识与用户约束冲突 → 优先遵守用户约束
 
 ---
 
@@ -116,7 +138,7 @@ class StrategyGeneratorAgent:
 
         return f"""为靶点 {target_name} ({target_gene}, UniProt:{target_uniprot}) 设计8-10个虚拟筛选策略。
 
-{constraint_block}{metrics_block}{pdb_note}
+{constraint_block}{prior_block}{metrics_block}{pdb_note}
 ## 调研报告全文
 {report_text[:6000]}
 

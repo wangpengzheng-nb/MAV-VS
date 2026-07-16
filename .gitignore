@@ -35,3 +35,11 @@ env/
 
 # ── Web 应用 ──
 web_app/__pycache__/
+
+# ── PPT 生成 (非项目代码) ──
+*.pptx
+gen_pptx.js
+生成演示文稿.py
+node_modules/
+package.json
+package-lock.json

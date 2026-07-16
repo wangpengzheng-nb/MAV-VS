@@ -8,6 +8,14 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 YOUR_QUERY = "基于靶点bcl-2去筛选一个抗衰老药物，要求其具有高选择性，不能作用于bcl-xl，且具有良好的ADMET性质。"
+PRIOR_KNOWLEDGE = ""
+# 先验知识示例 (取消注释即可启用):
+# PRIOR_KNOWLEDGE = """
+# 工具选择规则:
+# - PPI类型口袋 → 使用 Diffdock 进行对接
+# - 其他类型口袋 → 使用 gnina 进行对接
+# - 二分类结合预测 → 使用 Boltz-2
+# """
 SKIP_RESEARCH = False  # 跳过Step0, 从已有文件加载
 SKIP_STRATEGY = False  # 跳过Step0-1, 从已有文件加载
 LOAD_STRATEGIES_DIR = "/users_home/wangpengzheng/药物筛选智能体/分析文件/任务_20260710_164401_59b4bdbb/strategies"
@@ -157,7 +165,7 @@ def run_test():
         hdr("Step 1: 策略生成")
         report["_user_query"] = YOUR_QUERY
         from src.agents.strategy_generator import StrategyGeneratorAgent
-        result = StrategyGeneratorAgent().generate_strategies(report)
+        result = StrategyGeneratorAgent().generate_strategies(report, prior_knowledge=PRIOR_KNOWLEDGE)
         strategies = result["strategies"]
         print(f"  ✅ {len(strategies)} 策略")
 
@@ -232,7 +240,7 @@ def run_test():
         hdr("Step 2: 三人设独立评审")
         for i, s in enumerate(strategies, 1):
             print(f"\n  [{i}/{len(strategies)}]", end="", flush=True)
-            rr = reviewer.review_strategy(s, report, YOUR_QUERY)
+            rr = reviewer.review_strategy(s, report, YOUR_QUERY, prior_knowledge=PRIOR_KNOWLEDGE)
             review_results[s["strategy_name"]] = rr
         review_results = reviewer.calibrate_all(review_results, strategies, report, YOUR_QUERY)
         print(f"\n\n  📊 独立评分排名(校准后):")
@@ -300,7 +308,7 @@ def run_test():
         evolver = StrategyEvolver()
         evolved_strategies = evolver.evolve_top_n(
             strategies, review_results, tournament_records,
-            report, YOUR_QUERY, n=EVOLVE_TOP_N)
+            report, YOUR_QUERY, n=EVOLVE_TOP_N, prior_knowledge=PRIOR_KNOWLEDGE)
 
         evo_dir = os.path.join(TASK_DIR, "evolved_strategies")
         os.makedirs(evo_dir, exist_ok=True)
@@ -343,7 +351,7 @@ def run_test():
             mini_reviews = {}
             for i, s in enumerate(mini_strategies, 1):
                 print(f"  [{i}/{len(mini_strategies)}]", end="", flush=True)
-                rr = mini_reviewer.review_strategy(s, report, YOUR_QUERY)
+                rr = mini_reviewer.review_strategy(s, report, YOUR_QUERY, prior_knowledge=PRIOR_KNOWLEDGE)
                 mini_reviews[s["strategy_name"]] = rr
             mini_reviews = mini_reviewer.calibrate_all(mini_reviews, mini_strategies, report, YOUR_QUERY)
 

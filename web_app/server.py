@@ -67,6 +67,7 @@ async def run_pipeline(request: Request):
     except Exception:
         body = {}
     query = (body.get("query") or "").strip()
+    prior_knowledge = (body.get("prior_knowledge") or "").strip()
     if not query:
         raise HTTPException(400, "任务描述不能为空")
     if len(query) < 10:
@@ -91,7 +92,7 @@ async def run_pipeline(request: Request):
     def run_in_thread():
         try:
             runner = PipelineRunner(progress_callback=on_progress)
-            result = runner.run(query, task_dir)
+            result = runner.run(query, task_dir, prior_knowledge=prior_knowledge)
             task_results[task_id] = result
             task_status[task_id] = "done"
             # 发送完成信号

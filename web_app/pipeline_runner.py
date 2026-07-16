@@ -53,7 +53,7 @@ class PipelineRunner:
     # 主入口
     # =========================================================================
 
-    def run(self, query: str, task_dir: str) -> Dict[str, Any]:
+    def run(self, query: str, task_dir: str, prior_knowledge: str = "") -> Dict[str, Any]:
         """运行完整流水线。"""
         from src.agents.target_scout import TargetScoutAgent
         from src.agents.strategy_generator import StrategyGeneratorAgent
@@ -90,7 +90,7 @@ class PipelineRunner:
         self._emit("策略生成", "running", 20, "正在生成10个虚拟筛选策略...")
         report["_user_query"] = query
         gen = StrategyGeneratorAgent()
-        result = gen.generate_strategies(report)
+        result = gen.generate_strategies(report, prior_knowledge=prior_knowledge)
         strategies = result["strategies"]
         self._emit("策略生成", "running", 30, f"已生成 {len(strategies)} 个策略")
 
@@ -128,7 +128,7 @@ class PipelineRunner:
         review_results = {}
         for i, s in enumerate(strategies):
             self._sub_progress(2, 0.05 + 0.4 * (i / len(strategies)))
-            rr = reviewer.review_strategy(s, report, query)
+            rr = reviewer.review_strategy(s, report, query, prior_knowledge=prior_knowledge)
             review_results[s["strategy_name"]] = rr
 
         self._emit("策略审评", "running", 55, "评审后校准...")
@@ -197,7 +197,7 @@ class PipelineRunner:
             evolver = StrategyEvolver()
             evolved_strategies = evolver.evolve_top_n(
                 strategies, review_results, tournament_records,
-                report, query, n=EVOLVE_TOP_N)
+                report, query, n=EVOLVE_TOP_N, prior_knowledge=prior_knowledge)
 
             self._emit("策略进化", "running", 80, "正在进行迷你锦标赛验证...")
 
@@ -212,7 +212,7 @@ class PipelineRunner:
                 mini_reviews = {}
                 for i, s in enumerate(mini):
                     self._sub_progress(3, 0.6 + 0.3 * (i / len(mini)))
-                    rr = mini_reviewer.review_strategy(s, report, query)
+                    rr = mini_reviewer.review_strategy(s, report, query, prior_knowledge=prior_knowledge)
                     mini_reviews[s["strategy_name"]] = rr
                     # 显示进化效果对比
                     for ii, oname in enumerate(orig_top):
