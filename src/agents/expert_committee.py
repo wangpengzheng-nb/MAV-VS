@@ -566,30 +566,46 @@ class TournamentReviewer:
 
     @staticmethod
     def _fmt_strategy(s: dict) -> str:
+        # 兼容新旧两种 pipeline 步骤格式
+        steps = s.get("pipeline", s.get("pipeline_steps", []))
         steps_text = ""
-        for st in s.get("pipeline_steps", []):
+        for st in steps:
+            action_type = st.get("action_type", st.get("tool", "?"))
+            action_name = st.get("action_name", st.get("step_name", "?"))
+            description = st.get("description", st.get("action", ""))
+            params = st.get("parameters", {})
+            if isinstance(params, dict) and params:
+                param_str = " | ".join(f"{k}={v}" for k, v in list(params.items())[:4])
+            else:
+                param_str = st.get("metric", "") + " " + st.get("threshold", "")
             steps_text += (
-                f"  Step{st.get('step_number','?')}: {st.get('step_name','?')} "
-                f"[{st.get('tool','?')}]\n"
-                f"    操作: {st.get('action','?')[:200]}\n"
-                f"    指标: {st.get('metric','?')} | 阈值: {st.get('threshold','?')}\n"
+                f"  Step{st.get('step_number','?')}: {action_name} [{action_type}]\n"
+                f"    描述: {description[:200]}\n"
+                f"    参数: {param_str}\n"
             )
+        # 兼容新旧策略级字段
+        approach = s.get("approach_category", s.get("approach_type", "?"))
+        contingency = s.get("contingency", s.get("contingency_plan", {}))
+        if isinstance(contingency, dict):
+            contingency = "trigger: " + contingency.get("trigger", "?")
+        runtime = s.get("estimated_runtime_category", s.get("estimated_runtime", "?"))
+        suitable = s.get("suitable_when", "?")
         return f"""## 待评审策略
 
 **名称**: {s.get('strategy_name','?')}
 **标签**: {s.get('strategy_tagline','?')}
-**方法**: {s.get('approach_type','?')}
+**方法**: {approach}
 **设计原理**:
 {s.get('rationale','?')[:500]}
 
 **管道步骤**:
 {steps_text}
 **存活估算**: {s.get('survival_estimate','?')}
-**应急预案**: {s.get('contingency','?')[:200]}
+**应急预案**: {contingency[:200]}
 **优势**: {s.get('strengths',[])}
 **劣势**: {s.get('weaknesses',[])}
-**预估耗时**: {s.get('estimated_runtime','?')}
-**适用场景**: {s.get('suitable_when','?')}"""
+**预估耗时**: {runtime}
+**适用场景**: {suitable[:100]}"""
 
     # =========================================================================
     # 单评审官 LLM 调用
