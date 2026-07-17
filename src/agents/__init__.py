@@ -9,6 +9,7 @@ v3 新增:
 from src.agents.target_scout import TargetScoutAgent
 from src.agents.strategy_generator import StrategyGeneratorAgent
 from src.agents.strategy_evolver import StrategyEvolver
+from src.agents.tool_caller import ToolCallerAgent
 from src.agents.expert_committee import TournamentReviewer, RedTeamReviewer
 from src.agents.judge_agent import StrategyJudge
 from src.agents.orchestrator import OrchestratorAgent

@@ -145,6 +145,7 @@ def run_test():
     # 保存调研报告
     rf = os.path.join(TASK_DIR, "research_report.md")
     bs = report.get('binding_site', {})
+    summary = report.get('executive_summary', '')
     with open(rf, "w", encoding="utf-8") as f:
         f.write(f"# 靶点深度调研报告: {report.get('target_name','?')}\n\n")
         f.write(f"## 靶点信息\n")
@@ -153,6 +154,8 @@ def run_test():
                 f"**类型**: {report.get('target_macromolecule_type','Protein')} | "
                 f"**物种**: {report.get('target_organism','?')}\n\n")
         f.write(f"## 结合位点\n- 口袋: {bs.get('pocket_description','?')}\n\n")
+        if summary:
+            f.write(f"## 执行摘要\n{summary}\n\n---\n\n## 完整报告\n")
         f.write(report.get('full_report_text', '') + "\n")
     print(f"  📁 {rf}")
 

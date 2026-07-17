@@ -135,6 +135,55 @@ class VoteAggregator:
     # 诊断报告
     # ═══════════════════════════════════════════════════
 
+    # ═══════════════════════════════════════════════════
+    # 进化智能体输入准备
+    # ═══════════════════════════════════════════════════
+
+    def prepare_evolution_input(self, strategy: dict, strategy_name: str) -> dict:
+        """为进化智能体准备结构化输入: 策略底稿 + UUID + 聚合诊断。
+
+        Returns:
+            {"blueprint": strategy_with_uuids, "diagnosis": {...}}
+        """
+        import uuid as _uuid
+
+        # 1. 确保UUID
+        blueprint = dict(strategy)
+        if not blueprint.get("strategy_id"):
+            blueprint["strategy_id"] = f"s-{_uuid.uuid4().hex[:8]}"
+        for st in blueprint.get("pipeline", []):
+            if not st.get("step_id"):
+                st["step_id"] = f"a-{_uuid.uuid4().hex[:8]}"
+
+        # 2. 提取该策略的聚合诊断
+        concerns = self._dedup_concerns(self._get_concerns_for(strategy_name))
+        suggestions = self._dedup_suggestions(self._get_suggestions_for(strategy_name))
+
+        # 3. 维度强弱统计
+        dim_strengths = defaultdict(int)
+        dim_weaknesses = defaultdict(int)
+        for r in self.results:
+            for dv in r.get("dimension_votes", []):
+                dim = dv.get("dimension", "?")
+                w = dv.get("winner", "tie")
+                if w == "A" and r.get("strategy_a") == strategy_name:
+                    dim_strengths[dim] += 1
+                elif w == "B" and r.get("strategy_b") == strategy_name:
+                    dim_strengths[dim] += 1
+                elif w != "tie" and w != "N/A":
+                    dim_weaknesses[dim] += 1
+
+        return {
+            "blueprint": blueprint,
+            "diagnosis": {
+                "strategy_name": strategy_name,
+                "concerns": concerns,
+                "suggestions": suggestions,
+                "strengths": [f"{k}(+{v}场)" for k, v in sorted(dim_strengths.items(), key=lambda x: -x[1]) if v > 0],
+                "weaknesses": [f"{k}(-{v}场)" for k, v in sorted(dim_weaknesses.items(), key=lambda x: -x[1]) if v > 0],
+            }
+        }
+
     def generate_diagnostic(self, top_n: int = 3) -> List[Dict[str, Any]]:
         """为Top N策略生成聚合诊断报告。"""
         ranking = self.rank([]) if not hasattr(self, '_cached_ranking') else getattr(self, '_cached_ranking', [])
@@ -181,8 +230,10 @@ class VoteAggregator:
         for r in self.results:
             for side in ("A", "B"):
                 if r.get(f"strategy_{side.lower()}") == name:
-                    for c in r.get("critical_concerns", {}).get(side, []):
-                        concerns.append(c)
+                    items = r.get("critical_concerns", {}).get(side, [])
+                    if isinstance(items, str): items = [items]
+                    for c in (items or []):
+                        if isinstance(c, dict): concerns.append(c)
         return concerns
 
     def _get_suggestions_for(self, name: str) -> list:
@@ -190,8 +241,10 @@ class VoteAggregator:
         for r in self.results:
             for side in ("A", "B"):
                 if r.get(f"strategy_{side.lower()}") == name:
-                    for s in r.get("suggestions", {}).get(side, []):
-                        suggestions.append(s)
+                    items = r.get("suggestions", {}).get(side, [])
+                    if isinstance(items, str): items = [items]
+                    for s in (items or []):
+                        if isinstance(s, dict): suggestions.append(s)
         return suggestions
 
     def _get_confidences_for(self, name: str) -> list:

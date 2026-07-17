@@ -19,15 +19,16 @@ from pydantic import BaseModel, Field
 
 class ActionInput(BaseModel):
     type: str = Field(default="compound_library")
-    size: str = Field(default="")
+    size: Any = Field(default="")  # str or int
     format: str = Field(default="SMILES")
 
 class ActionOutput(BaseModel):
     type: str = Field(default="filtered_compounds")
-    size: str = Field(default="")
+    size: Any = Field(default="")  # str or int
     format: str = Field(default="SDF")
 
 class PipelineAction(BaseModel):
+    step_id: str = Field(default="")  # UUID, Python端自动生成
     step_number: int = Field(default=1)
     action_type: str = Field(default="molecular_docking")
     action_name: str = Field(default="")
@@ -429,6 +430,14 @@ action_type 必须从以下标签中选择: library_preparation, protein_prepara
                         print(f"  ⚠️ 策略{i+1}校验失败: {e}", flush=True)
             if fail_count > 0:
                 print(f"  📊 {len(items)}个原始策略, {fail_count}个校验失败, {len(result)}个成功", flush=True)
+            # 🆕 Python端注入UUID (LLM不可靠)
+            import uuid as _uuid
+            for s in result:
+                if not s.get("strategy_id"):
+                    s["strategy_id"] = f"s-{_uuid.uuid4().hex[:8]}"
+                for st in s.get("pipeline", []):
+                    if not st.get("step_id"):
+                        st["step_id"] = f"a-{_uuid.uuid4().hex[:8]}"
             return result, raw
         except Exception as e:
             print(f"  ❌ LLM调用异常: {e}", flush=True)

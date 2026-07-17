@@ -197,9 +197,11 @@ class TournamentReviewer:
                 raw = raw[raw.find("{"):]
             parsed = self._robust_parse(raw)
 
-            # 强制覆盖: 防LLM幻觉写错ID
+            # 强制覆盖: 防LLM幻觉写错ID + 填入策略名(LLM不会自己填)
             parsed["reviewer_id"] = reviewer_id or cfg["id"]
             parsed["match_id"] = match_id
+            parsed["strategy_a"] = strategy_a.get("strategy_name", "?")
+            parsed["strategy_b"] = strategy_b.get("strategy_name", "?")
             parsed.setdefault("overall_verdict", "tie")
             parsed.setdefault("verdict_confidence", "medium")
             parsed.setdefault("dimension_votes", [])

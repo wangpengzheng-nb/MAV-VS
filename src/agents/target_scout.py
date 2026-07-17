@@ -1394,44 +1394,63 @@ class TargetScoutAgent:
 
     def _generate_summary(self, target_name: str, gene: str,
                            full_text: str) -> str:
-        """生成执行摘要 (~6000 tokens), 保留关键数据, 压缩冗长描述。"""
+        """生成结构化执行摘要 (JSON, ~2000 tokens), 只保留虚拟筛选决策关键数据。"""
         if not full_text:
             return ""
-
         is_reasoner = "reasoner" in self.model.lower()
-        prompt = f"""请为靶点 {target_name} ({gene}) 生成一份虚拟筛选执行摘要。
+        prompt = f"""从虚拟筛选角度提取靶点 {target_name} ({gene}) 的关键数据, 输出JSON:
 
-## 要求
-- 控制在 6000 tokens 以内 (~4000汉字)
-- 包含4个部分: 靶点生物学、结构生物学、已知配体、可药性评估
-- 保留所有关键数字: PDB ID、分辨率、IC50/Ki/Kd值、口袋体积、关键残基名
-- 删除冗长的背景描述、重复语句、文献引用编号
-- 使用简洁的列表和表格代替长段落
-- 确保策略生成智能体仅凭此摘要就能获得足够的靶点信息
+{{
+  "target_profile": {{
+    "target_class": "PPI / Kinase / GPCR / Protease / Epigenetic / other",
+    "pocket_type": "deep_cleft / shallow_groove / flat_ppi / allosteric / cryptic",
+    "pocket_volume_approx": "small(<300) / medium(300-800) / large(>800) Å³",
+    "pocket_polarity": "hydrophobic / mixed / polar",
+    "rule_category": "Ro5 / bRo5 / custom",
+    "key_selectivity_residues": "与同源蛋白的差异残基(如果有)"
+  }},
+  "structures": [
+    {{"pdb_id":"XXXX","resolution":"X.XÅ","method":"X-ray/Cryo-EM","has_ligand":true/false,"ligand_ids":["XXX"],"key_residues":["Asp103","Trp144"]}}
+  ],
+  "known_ligands": {{
+    "best_activity": {{"chembl_id":"XXX","type":"IC50/Ki/Kd","value":0.01,"unit":"nM"}},
+    "mw_range":[250,600],
+    "logp_range":[1.0,5.0],
+    "key_pharmacophore":["H-bond donor","hydrophobic center"],
+    "key_SAR":"简述构效关系(50字)"
+  }},
+  "druggability": {{
+    "score":"0-10",
+    "recommended_approaches":["SBDD","FBDD"],
+    "red_flags":["selectivity_concern","PPI_flat_pocket"],
+    "drug_design_notes":"关键注意事项(50字)"
+  }}
+}}
+
+要求: 每个字段必须填, 不确定的写"待验证"。只输出纯JSON, 不要markdown。
 
 ## 原始报告
-{full_text}
-
-输出纯文本, 不要JSON包装, 4个章节用 ## 标题分隔。"""
+{full_text}"""
 
         try:
-            kwargs = dict(model=self.model, max_tokens=4096,
-                          messages=[{"role":"system","content":"你是药物研发报告编辑专家。任务是将长篇靶点调研报告压缩为精炼的执行摘要，保留所有关键数据点。输出纯文本。"},
+            kwargs = dict(model=self.model, max_tokens=2048,
+                          messages=[{"role":"system","content":"你是药物研发数据提取专家。只提取虚拟筛选决策需要的结构化数据, 输出纯JSON。不编造数据, 不确定的填'待验证'。"},
                                     {"role":"user","content":prompt}])
             if not is_reasoner:
-                kwargs["temperature"] = 0.2
+                kwargs["temperature"] = 0.1
+                kwargs["response_format"] = {"type": "json_object"}
             resp = self.client.chat.completions.create(**kwargs)
             raw = (resp.choices[0].message.content or "").strip()
-            if raw.startswith("```"):
-                raw = re.sub(r'^```\w*\n?', '', raw)
-                raw = re.sub(r'\n?```$', '', raw)
+            if "{" in raw: raw = raw[raw.find("{"):]
+            parsed = json.loads(raw)
+            summary_text = json.dumps(parsed, ensure_ascii=False, indent=2)
             finish = getattr(resp.choices[0], "finish_reason", "stop")
             if finish == "length":
-                print(f"  ⚠️ 摘要生成被截断", flush=True)
-            return raw
+                print(f"  ⚠️ 摘要被截断(但JSON仍然有效)", flush=True)
+            return summary_text
         except Exception as e:
-            print(f"  ⚠️ 摘要生成失败: {e}", flush=True)
-            return full_text[:6000]
+            print(f"  ⚠️ 摘要生成失败: {e}, 使用全文前2000字符", flush=True)
+            return full_text[:2000]
 
     @staticmethod
     def _build_api_fallback(target_name, uniprot_data, verified_pdbs,
