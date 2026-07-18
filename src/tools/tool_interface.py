@@ -14,9 +14,13 @@ class ToolSpec:
     inputs: Dict[str, str] = field(default_factory=dict)   # {"library": "sdf", "protein": "pdb"}
     outputs: Dict[str, str] = field(default_factory=dict)  # {"docked": "sdf", "scores": "csv"}
     batching_strategy: str = "none"  # "none" | "file_split" | "smiles_split" | "custom"
-    batch_size: int = 1000           # file_split/smiles_split 时每批数量
+    batch_size: int = 1000
     input_aliases: Dict[str, List[str]] = field(default_factory=dict)
-    # 例: {"library": ["docked_ligands","compounds"], "protein": ["target_pdb","receptor"]}
+    # ── 部署元数据 ──
+    tier: str = "conda"              # "conda" | "apptainer"
+    image: str = ""                  # apptainer 镜像路径 (tier 2/3 必填)
+    conda_env: str = "base_screening"  # conda 环境名 (tier 1)
+    gpu_required: bool = False
 
 
 class BaseTool(ABC):

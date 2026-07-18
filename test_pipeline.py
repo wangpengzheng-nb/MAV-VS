@@ -150,9 +150,23 @@ def step2_evaluate(td: str, strategies: list, report: dict) -> dict:
 # ═══════════════════════════════════════════
 def step3_evolve(td: str, strategies: list, report: dict, eval_result: dict) -> list:
     ed = os.path.join(td, "evolved_strategies")
-    existing = sorted([f for f in os.listdir(ed) if f.endswith('.md')]) if os.path.isdir(ed) else []
-    if existing:
-        print(f"  ⏩ 已有 {len(existing)} 个进化策略, 跳过")
+    json_files = sorted([f for f in os.listdir(ed) if f.endswith('.json')]) if os.path.isdir(ed) else []
+    if json_files:
+        print(f"  ⏩ 已有 {len(json_files)} 个进化策略JSON, 从文件加载")
+        loaded = []
+        for jf in json_files:
+            with open(os.path.join(ed, jf), encoding="utf-8") as f:
+                loaded.append(json.load(f))
+        # 合并: 用进化版替换原始版
+        merged = {s.get("strategy_name", ""): s for s in strategies}
+        for s in loaded:
+            orig_name = s["strategy_name"].replace(" (v2 进化版)", "")
+            if orig_name in merged:
+                merged[orig_name] = s
+        return list(merged.values())
+    md_existing = sorted([f for f in os.listdir(ed) if f.endswith('.md')]) if os.path.isdir(ed) else []
+    if md_existing:
+        print(f"  ⏩ 已有 {len(md_existing)} 个进化策略MD, 跳过")
         return strategies
     from src.agents.strategy_evolver import StrategyEvolver
     from src.agents.judge_agent import VoteAggregator as VA
@@ -192,8 +206,112 @@ def step3_evolve(td: str, strategies: list, report: dict, eval_result: dict) -> 
                 f.write(f"# 进化策略 {i}: {s['strategy_name']}\n")
                 for c in s.get('evolution_changelog', []): f.write(f"- {c}\n")
                 f.write(f"\n## 原理\n{s.get('rationale','')}\n")
+            # 同时保存 JSON
+            jf = os.path.join(ed, f"evolved_{i:02d}_{s['strategy_name'][:50]}.json")
+            with open(jf, "w", encoding="utf-8") as f:
+                json.dump(s, f, ensure_ascii=False, indent=2)
     print(f"  ✅ 进化策略 → {ed}/")
     return evolved
+
+
+# ═══════════════════════════════════════════
+# Step 4: 工具执行 (DAG构建 + 模拟执行)
+# ═══════════════════════════════════════════
+def step4_tool_execute(td: str, strategies: list, report: dict) -> dict:
+    """构建 DAG 并模拟执行 (不实际跑工具, 只验证管线连通性)。"""
+    from src.tools.tool_registry import ToolRegistry
+    from src.tools.builtin_tools import register_builtin_tools
+    from src.tools.data_bus import ResourceContext
+    from src.tools.orchestrator import DAGWorkflow
+    import tempfile
+
+    reg = ToolRegistry()
+    register_builtin_tools(reg)
+    print(f"  🔧 已注册 {reg.count()} 个工具")
+
+    # 找进化版(v2)策略: 先从 evolved_strategies 目录加载
+    evolved = [s for s in strategies if "(v2" in s.get("strategy_name", "")]
+    evo_dir = os.path.join(td, "evolved_strategies")
+    if not evolved and os.path.isdir(evo_dir):
+        json_files = sorted([f for f in os.listdir(evo_dir) if f.endswith('.json')])
+        if json_files:
+            for jf in json_files:
+                with open(os.path.join(evo_dir, jf), encoding="utf-8") as f:
+                    evolved.append(json.load(f))
+    if not evolved:
+        print("  ⚠️ 无进化版策略 (需先运行 --step evolve)")
+        return {}
+
+    results = {}
+    for s in evolved:
+        # 校验: 每个 action_type 是否有匹配工具
+        pipeline = s.get("updated_pipeline") or s.get("pipeline") or s.get("pipeline_steps", [])
+        missing = []
+        for st in pipeline:
+            at = st.get("action_type", "?")
+            tool = reg.find(at)
+            if not tool:
+                missing.append(at)
+
+        if missing:
+            print(f"  ❌ [{s['strategy_name'][:40]}] 缺失工具: {missing}")
+            continue
+
+        print(f"\n  🚀 [{s['strategy_name'][:50]}]")
+        print(f"     pipeline: {len(pipeline)} 步")
+
+        # 构建 DAG
+        work_dir = os.path.join(td, "workflows", s["strategy_name"][:40].replace("/","_"))
+        ctx = ResourceContext(work_dir)
+        wf = DAGWorkflow(reg, ctx, max_workers=1)
+        wf.build_from_strategy(s)
+
+        # 打印 DAG 节点
+        for sid, node in wf.nodes.items():
+            tool_name = node.tool.spec.name if node.tool else "?"
+            tier = node.tool.spec.tier if node.tool else "?"
+            gpu = "🔴GPU" if (node.tool and node.tool.spec.gpu_required) else "🟢CPU"
+            params_preview = str(node.params)[:80]
+            print(f"    [{sid}] {node.action_type} → {tool_name} ({tier}, {gpu})")
+            print(f"         params: {params_preview}")
+
+        # 模拟: 验证数据绑定 (累加上游产物)
+        accumulated = {}
+        bind_ok = True
+        for sid in wf.nodes:
+            node = wf.nodes[sid]
+            if accumulated and node.tool and node.tool.spec.inputs:
+                from src.tools.orchestrator import _auto_bind
+                bound = _auto_bind(accumulated, node.tool.spec, wf.bus)
+                missing = set(node.tool.spec.inputs.keys()) - set(bound.keys())
+                if missing:
+                    # box_config 缺失是正常的(需策略参数提供)
+                    non_critical = {'box_config', 'md_config', 'params'}
+                    real_missing = missing - non_critical
+                    if real_missing:
+                        print(f"    ⚠️ [{sid}] 绑定缺失: {sorted(real_missing)}")
+                        bind_ok = False
+                    else:
+                        print(f"    ℹ️ [{sid}] 仅缺配置参数: {sorted(missing)}")
+            # 累加当前节点输出
+            mock_out = {k: f"<mock_{k}>" for k in (node.tool.spec.outputs or {}).keys()}
+            accumulated.update(mock_out)
+
+        status = "✅ DAG连通" if bind_ok else "⚠️ 部分绑定失败"
+        print(f"    {status}")
+
+        results[s["strategy_name"]] = {
+            "status": "dag_built" if bind_ok else "bind_failed",
+            "nodes": len(wf.nodes),
+        }
+
+    # 保存 DAG 元数据
+    dag_file = os.path.join(td, "dag_plans.json")
+    with open(dag_file, "w", encoding="utf-8") as f:
+        json.dump({k: {"status": v["status"], "nodes": v["nodes"]}
+                   for k, v in results.items()}, f, ensure_ascii=False, indent=2)
+    print(f"\n  📁 DAG 计划 → {dag_file}")
+    return results
 
 
 # ═══════════════════════════════════════════
@@ -201,7 +319,7 @@ def step3_evolve(td: str, strategies: list, report: dict, eval_result: dict) -> 
 # ═══════════════════════════════════════════
 def main():
     p = argparse.ArgumentParser(description="AutoVS-Agent 分步测试管线")
-    p.add_argument("--step", default="all", choices=["all","research","generate","evaluate","evolve"])
+    p.add_argument("--step", default="all", choices=["all","research","generate","evaluate","evolve","tool_execute"])
     p.add_argument("--to-end", action="store_true", help="从指定step运行到结束")
     p.add_argument("--task-dir", default="", help="指定任务目录(复用已有上游文件)")
     args = p.parse_args()
@@ -212,7 +330,7 @@ def main():
     td = get_task_dir()
     print(f"\n{SEP}\n  Pipeline Test\n  Task: {os.path.basename(td)}\n  Query: {TASK_QUERY}\n{SEP}\n")
 
-    steps = ["research", "generate", "evaluate", "evolve"]
+    steps = ["research", "generate", "evaluate", "evolve", "tool_execute"]
     if args.step != "all":
         start_idx = steps.index(args.step)
         if not args.to_end:
@@ -269,7 +387,14 @@ def main():
     # Step 3: 进化
     if "evolve" in steps:
         print(f"\n{'─'*40}\n  [Step 3] 策略进化\n{'─'*40}")
-        step3_evolve(td, strategies, report, eval_result)
+        evolved = step3_evolve(td, strategies, report, eval_result)
+        # 将进化策略合并到主列表供后续步骤使用
+        strategies = evolved if evolved else strategies
+
+    # Step 4: 工具执行
+    if "tool_execute" in steps:
+        print(f"\n{'─'*40}\n  [Step 4] 工具执行 (DAG构建)\n{'─'*40}")
+        step4_tool_execute(td, strategies, report)
 
     print(f"\n{SEP}\n  Done. Task dir: {td}\n{SEP}")
 

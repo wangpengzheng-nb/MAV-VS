@@ -36,7 +36,8 @@ class DAGWorkflow:
 
     def build_from_strategy(self, strategy: dict):
         """从策略 JSON 的 pipeline 构建 DAG。"""
-        pipeline = strategy.get("pipeline", strategy.get("pipeline_steps", []))
+        pipeline = (strategy.get("pipeline") or strategy.get("updated_pipeline")
+                     or strategy.get("pipeline_steps", []))
         prev_outputs: Optional[dict] = None
         prev_step_id: Optional[str] = None
 
@@ -53,14 +54,15 @@ class DAGWorkflow:
             if prev_outputs and tool.spec.inputs:
                 node_inputs = _auto_bind(prev_outputs, tool.spec, self.bus)
 
-            deps = [prev_step_id] if prev_step_id else []
+            # 依赖所有前驱节点 (确保上游产物能穿越多层到达)
+            deps = list(self.nodes.keys())  # 已构建的所有节点
             self.nodes[sid] = DAGNode(
                 step_id=sid, action_type=at, tool=tool,
                 params=step.get("parameters", {}),
                 inputs=node_inputs, deps=deps,
             )
             prev_step_id = sid
-            prev_outputs = None  # 运行时才填充
+            prev_outputs = None
 
     def set_initial_inputs(self, inputs: Dict[str, str]):
         """设置第一个节点的输入(来自用户上传文件)。"""
@@ -139,11 +141,15 @@ def _auto_bind(prev_outputs: dict, next_spec: ToolSpec, bus: DataBus) -> dict:
 
 
 def _pass_to_next(nodes: dict, current_sid: str, outputs: dict):
-    """将当前节点的输出作为下一个节点的输入。"""
+    """累加当前节点的输出到下一个节点的输入 (不覆盖已有绑定)。"""
     next_sids = [sid for sid, n in nodes.items() if current_sid in n.deps]
     for nsid in next_sids:
-        if not nodes[nsid].inputs:
-            nodes[nsid].inputs = dict(outputs)
+        existing = dict(nodes[nsid].inputs) if nodes[nsid].inputs else {}
+        # 上游输出合并到下游输入 (已有值优先, 不被覆盖)
+        for k, v in outputs.items():
+            if k not in existing:
+                existing[k] = v
+        nodes[nsid].inputs = existing
 
 
 def _topo_order(nodes: dict) -> List[str]:

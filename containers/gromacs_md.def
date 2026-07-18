@@ -1,0 +1,23 @@
+Bootstrap: docker
+From: continuumio/miniconda3:24.1.2-0
+
+%post
+    conda install -y -c conda-forge -c bioconda \
+        gromacs openbabel \
+        numpy matplotlib pandas \
+        ambertools acpype \
+        gmx_mmpbsa && \
+    conda clean -afy
+    pip install --no-cache-dir dimorphite-dl
+
+%environment
+    export PATH=/opt/conda/bin:$PATH
+    export GMX_MAXBACKUP=-1
+
+%runscript
+    exec /opt/conda/bin/gmx "$@"
+
+%labels
+    Author AutoVS-Agent
+    Version 1.0
+    Description GROMACS + gmx_MMPBSA + ACPYPE + OpenBabel
