@@ -1,0 +1,4 @@
+[submodule "admet_ai"]
+	path = admet_ai
+	url = https://github.com/wangpengzheng-nb/admet_ai.git
+

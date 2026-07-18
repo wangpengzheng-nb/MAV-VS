@@ -151,7 +151,7 @@ class StrategyGeneratorAgent:
 
         raise RuntimeError(
             f"策略生成失败: 4次LLM调用均返回<3个有效策略。"
-            f"请检查调研报告是否完整, 或手动运行 test_tournament.py 查看详细日志。"
+            f"请检查调研报告是否完整, 或运行 autovs doctor 查看环境状态。"
         )
 
     def _build_strategy_prompt(self, target_name, target_gene, target_uniprot, report_text, user_query="", prior_knowledge=""):
@@ -232,7 +232,14 @@ class StrategyGeneratorAgent:
 
 ⚠️ 关键变化: 策略只描述"做什么"(Action), 不绑定具体工具! 工具选择由下游智能体完成。
 
-action_type 必须从以下标签中选择: library_preparation, protein_preparation, pharmacophore_screening, similarity_screening, shape_matching, admet_filtering, selectivity_filtering, diversity_selection, physicochemical_filtering, molecular_docking, covalent_docking, ensemble_docking, consensus_scoring, machine_learning_scoring, molecular_dynamics, free_energy_calculation, water_analysis, interaction_analysis, binding_mode_analysis, binding_site_detection, pocket_comparison, structure_alignment, de_novo_design, scaffold_hopping, fragment_growing, linker_design, r_group_enumeration, visual_inspection, positive_control_validation, decoy_validation, statistical_analysis
+第一版系统只支持有明确结合口袋的非共价小分子SBDD。action_type **只能**从以下已注册能力中选择:
+library_preparation, protein_preparation, binding_site_detection,
+physicochemical_filtering, diversity_selection, molecular_docking,
+interaction_analysis, admet_filtering, molecular_dynamics, final_ranking,
+report_generation
+
+严禁输出药效团、形状、共价、FEP、片段生长、生成式设计、人工目视检查等未注册步骤；
+策略必须能在上述能力集合内完整执行。molecular_dynamics只能用于最终少量候选，不能用于大库粗筛。
 
 {{
   "strategies": [{{

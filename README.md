@@ -1,162 +1,98 @@
-# 🧬 AutoVS-Agent — AI 驱动的自动化虚拟筛选智能体
+# AutoVS-Agent
 
-AutoVS-Agent 是一个基于大语言模型（LLM）的多智能体协作系统，能够自动化完成从靶点调研、策略生成、策略审评到策略进化的完整虚拟筛选管线。
+AutoVS-Agent 是面向非共价小分子结构虚拟筛选的无人值守系统。用户提供自然语言任务、蛋白 PDB 和 SMI/CSV/SDF 分子库，系统持久化执行调研、策略生成、全排列投票、策略进化、可执行性校验、计算工具 DAG、候选排序和可复现报告。
 
-## 🏗️ 架构总览
+当前版本已真实跑通 CPU 基线：
 
-```
-用户输入任务
-     │
-     ▼
-┌──────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Step 0       │    │ Step 1           │    │ Step 2           │
-│ 靶点调研      │───▶│ 策略生成          │───▶│ 策略审评          │
-│              │    │                  │    │                  │
-│ UniProt      │    │ 基于调研报告      │    │ 三人设独立评审     │
-│ PDB          │    │ 生成 8-10 个     │    │ (漏斗/需求/产出)   │
-│ ChEMBL       │    │ 虚拟筛选策略      │    │ 瑞士制锦标赛      │
-│ PubMed       │    │                  │    │ Elo 排名         │
-│ ClinicalTrials│   │                  │    │                  │
-└──────────────┘    └──────────────────┘    └────────┬─────────┘
-                                                      │
-                                                      ▼
-┌──────────────┐    ┌──────────────────┐
-│ 输出结果      │◀───│ Step 3           │
-│              │    │ 策略进化          │
-│ 调研报告      │    │                  │
-│ 进化策略      │    │ 弱点靶向修复      │
-│ 排名榜单      │    │ 迷你锦标赛验证    │
-└──────────────┘    └──────────────────┘
+```text
+输入校验 → 口袋解析 → RDKit标准化/PAINS/3D构象
+→ OpenBabel蛋白准备 → smina对接 → 姿态分数解析
+→ 骨架多样性Top 20 → Markdown/HTML报告
 ```
 
-## 🚀 快速开始
+PLIP、ADMET-AI、GNINA 和分级 GROMACS MD 通过能力目录明确报告可用性；未成功执行的证据不会用 mock 数据填充。
 
-### 环境要求
-
-- Python 3.10+
-- DeepSeek API Key（或其他兼容 OpenAI 接口的 LLM）
-
-### 安装
+## 安装
 
 ```bash
-git clone <repo-url>
-cd 药物筛选智能体
-pip install openai pydantic langgraph python-dotenv
-pip install fastapi uvicorn  # Web 界面需要
+python -m pip install -e '.[test]'
+autovs doctor
 ```
 
-### 配置
+生产环境定义见 `environments/autovs-core.yml` 和 `environments/autovs-admet.yml`。工具路径、Conda 环境、Apptainer 镜像和 Slurm 资源统一位于 `config/tools.toml`，也可使用 `AUTOVS_*` 环境变量覆盖。
 
-在项目根目录创建 `.env` 文件：
-
-```env
-DEEPSEEK_API_KEY="sk-your-api-key"
-DEEPSEEK_API_BASE="https://api.deepseek.com"
-```
-
-### 命令行运行
+## CLI
 
 ```bash
-# 完整管线（调研 → 生成 → 审评 → 进化）
-python test_tournament.py
+# 环境与能力检查
+autovs doctor
+
+# 正式多智能体流水线
+autovs run \
+  --query '寻找靶向BCL2结合口袋的非共价小分子抑制剂' \
+  --protein receptor.pdb \
+  --library compounds.smi \
+  --center -15.36 2.24 -9.56
+
+# 当前无GPU时的真实CPU基础链路诊断
+autovs run \
+  --query 'BCL2 CPU baseline validation' \
+  --protein receptor.pdb \
+  --library compounds.smi \
+  --center -15.36 2.24 -9.56 \
+  --cpu-only --baseline --wait
+
+autovs status TASK_ID
+autovs resume TASK_ID
+autovs report TASK_ID
 ```
 
-### Web 界面运行
+`--baseline` 只跳过 LLM 调研/投票，计算步骤仍调用真实 RDKit、OpenBabel 和 smina；它不会生成模拟评分。
+
+## Web 与 MCP
 
 ```bash
-cd web_app && python server.py
-# 访问 http://localhost:8080
+# Web，默认仅本机访问
+python -m web_app.server
+
+# MCP Streamable HTTP: http://127.0.0.1:8765/mcp
+autovs-tools-mcp
 ```
 
-## 📋 四步管线详解
+MCP 只暴露固定工具：能力发现、健康检查、工作流校验、步骤提交、作业查询、产物查询、日志和显式确认取消。它不接受任意 shell 命令。
 
-### Step 0: 靶点调研（TargetScoutAgent）
+## WorkflowPlan v1
 
-从真实 API 获取数据，防止 LLM 幻觉：
+策略生成器和进化器只能输出已注册 action。执行前统一转换为严格的 `WorkflowPlan 1.0`：
 
-| 数据源 | 用途 |
-|---|---|
-| **UniProt API** | 蛋白功能、基因、物种验证 |
-| **RCSB PDB API** | 结构搜索、分辨率验证、物种校验 |
-| **ChEMBL API** | 真实 IC50/Ki/Kd 活性数据 |
-| **PubMed API** | 文献检索 |
-| **ClinicalTrials.gov API** | 临床试验检索 |
-
-产出：`research_report.md` — 包含靶点生物学、结构分析、已知配体、可药性评估 4 个章节。
-
-### Step 1: 策略生成（StrategyGeneratorAgent）
-
-基于调研报告，LLM 一次性生成 8-10 个差异化虚拟筛选策略，每个策略包含：
-- 完整步骤管线（工具名称、参数、阈值）
-- 存活率估算
-- 应急预案
-- 优劣势分析
-
-### Step 2: 策略审评（TournamentReviewer + StrategyJudge）
-
-三位评审官独立评分 + 瑞士制锦标赛:
-
-| 评审官 | 关注维度 | 权重 |
-|---|---|---|
-| **漏斗工程评审官** | 存活链完整性、前后端效率、工具资源 | 30% |
-| **需求匹配评审官** | 靶点适配性、用户约束、数据利用 | 35% |
-| **产出质量评审官** | 化学空间覆盖、骨架多样性、命中率 | 35% |
-
-评审后采用**瑞士制锦标赛**配对辩论，通过裁判裁决和 Elo 积分系统对策略排名。
-
-### Step 3: 策略进化（StrategyEvolver）
-
-对 Top 3 策略做弱点靶向修复：
-- 提取三官评审 + 裁判判例中的所有弱点
-- LLM 定向修复每个弱点
-- 迷你锦标赛验证进化效果
-
-产出：`evolved_strategies/` — 进化版策略，包含 `evolution_changelog`。
-
-## 📁 项目结构
-
-```
-药物筛选智能体/
-├── src/
-│   ├── agents/
-│   │   ├── target_scout.py        # Step 0: 靶点调研
-│   │   ├── strategy_generator.py  # Step 1: 策略生成
-│   │   ├── expert_committee.py    # Step 2: 三人设评审
-│   │   ├── judge_agent.py         # Step 2: 裁判 + Elo
-│   │   └── strategy_evolver.py    # Step 3: 策略进化
-│   ├── graph/                     # LangGraph 工作流（v1 兼容）
-│   └── tools/                     # 分子工具
-├── web_app/
-│   ├── server.py                  # FastAPI 服务 + SSE
-│   ├── pipeline_runner.py         # 管线包装 + 进度回调
-│   └── static/                    # 前端页面
-├── test_tournament.py             # CLI 入口
-├── main.py                        # v1 CLI 入口（旧版）
-├── config/                        # 配置文件
-├── .env                           # API 密钥（不入库）
-└── README.md
+```json
+{
+  "plan_version": "1.0",
+  "strategy_id": "example",
+  "steps": [{
+    "step_id": "dock",
+    "action_type": "molecular_docking",
+    "requires": ["protein-preparation"],
+    "inputs": [],
+    "outputs": [],
+    "parameters": {"exhaustiveness": 4, "num_modes": 3},
+    "quality_gates": [],
+    "resource_profile": {
+      "executor": "slurm", "environment": "smina_stage2",
+      "cpus": 10, "memory_gb": 4, "gpu_required": false,
+      "timeout_seconds": 3600
+    }
+  }]
+}
 ```
 
-## ⚙️ test_tournament.py 配置项
+未知 action、向前依赖、额外字段、缺失口袋和越界文件路径会在计算前被拒绝。每个任务、作业和带 SHA256 的产物均写入 SQLite，Web/CLI 重启后仍可查询。
 
-```python
-YOUR_QUERY = "你的虚拟筛选任务描述"
-SKIP_RESEARCH = True      # 跳过调研，从已有目录加载
-SKIP_STRATEGY = True      # 跳过策略生成
-SKIP_EVALUATION = True    # 跳过审评（从已有文件加载评审和锦标赛结果）
-LOAD_FROM_DIR = "分析文件/任务_xxx"  # 已有任务目录路径
-EVOLVE_TOP_N = 3          # 进化 Top N 策略；设为 0 跳过进化
-SWISS_ROUNDS = 4          # 瑞士制轮数
+## 测试
+
+```bash
+pytest -q
+python -m compileall -q autovs src web_app
 ```
 
-## 🔑 技术特性
-
-- **防幻觉机制**: PDB ID/IC50 坐标由 API 数据覆盖 LLM 输出
-- **多段并行生成**: 调研报告 4 章节各一次独立 LLM 调用，防止 token 预算耗尽
-- **瑞士制配对**: 10 策略 × 4 轮 = 20 场，相比全量配对 45 场节省 56%
-- **动态 Elo**: K 因子 24/32/48 + 冷门惩罚 1.5×
-- **实时进度推送**: Web 界面通过 SSE 推送 5 节点进度
-
-## 📄 License
-
-MIT
+GPU恢复后的科学验收顺序为：先用 BCL2/60OK 已知活性与 decoy 做富集验证，再用新靶点完成无人值守泛化验证。

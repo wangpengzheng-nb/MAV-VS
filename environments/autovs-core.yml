@@ -1,0 +1,12 @@
+name: autovs-core
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - rdkit>=2025.3
+  - openbabel
+  - pandas>=2.2
+  - pip
+  - pip:
+      - -e ".[test]"
+

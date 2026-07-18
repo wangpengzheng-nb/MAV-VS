@@ -1,0 +1,51 @@
+[service]
+host = "127.0.0.1"
+port = 8765
+database = "runtime/autovs.sqlite3"
+task_root = "runtime/tasks"
+
+[limits]
+max_library_molecules = 1000000
+final_hits = 20
+short_md_hits = 10
+long_md_hits = 3
+default_ph = 7.4
+
+[executables]
+conda = "/users_home/wangpengzheng/miniforge3/bin/conda"
+apptainer = "/usr/bin/apptainer"
+sbatch = "/usr/bin/sbatch"
+squeue = "/usr/bin/squeue"
+scancel = "/usr/bin/scancel"
+gnina = "/users_home/wangpengzheng/software/gnina"
+smina = "/users_home/wangpengzheng/miniforge3/envs/smina_stage2/bin/smina"
+plip = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/plip"
+obabel = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/obabel"
+fpocket = ""
+
+[environments]
+core = "autovs-core"
+smina = "smina_stage2"
+gnina = "gnina"
+plip = "plip"
+protonation = "geometric"
+admet = "autovs-admet"
+mmgbsa = "gmx_mmpbsa"
+
+[containers]
+gromacs = "containers/gromacs_md.sif"
+
+[slurm.cpu]
+partition = "cpu_only"
+qos = "cpuonly"
+cpus = 10
+memory = "18G"
+time = "3-00:00:00"
+
+[slurm.gpu]
+partition = "gpu_long"
+gres = "gpu:a100_2g.20gb:1"
+cpus = 10
+memory = "64G"
+time = "1-12:00:00"
+

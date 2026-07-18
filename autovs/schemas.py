@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+from enum import Enum
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class ActionType(str, Enum):
+    INPUT_VALIDATION = "input_validation"
+    PROTEIN_PREPARATION = "protein_preparation"
+    POCKET_DEFINITION = "pocket_definition"
+    MOLECULE_STANDARDIZATION = "molecule_standardization"
+    CONFORMER_GENERATION = "conformer_generation"
+    PHYSICOCHEMICAL_FILTERING = "physicochemical_filtering"
+    DIVERSITY_SELECTION = "diversity_selection"
+    MOLECULAR_DOCKING = "molecular_docking"
+    POSE_EXTRACTION = "pose_extraction"
+    INTERACTION_ANALYSIS = "interaction_analysis"
+    ADMET_FILTERING = "admet_filtering"
+    SHORT_MD = "short_md"
+    MOLECULAR_DYNAMICS = "molecular_dynamics"
+    FINAL_RANKING = "final_ranking"
+    REPORT_GENERATION = "report_generation"
+
+
+class ArtifactRef(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    format: str = Field(min_length=1, max_length=20)
+    path: str | None = None
+
+
+class ResourceProfile(StrictModel):
+    executor: Literal["python", "conda", "slurm", "apptainer"] = "python"
+    environment: str | None = None
+    cpus: int = Field(default=1, ge=1, le=128)
+    memory_gb: int = Field(default=4, ge=1, le=1024)
+    gpu_required: bool = False
+    timeout_seconds: int = Field(default=3600, ge=1)
+
+
+class WorkflowStep(StrictModel):
+    step_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    action_type: ActionType
+    requires: list[str] = Field(default_factory=list)
+    inputs: list[ArtifactRef] = Field(default_factory=list)
+    outputs: list[ArtifactRef] = Field(default_factory=list)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    quality_gates: list[str] = Field(default_factory=list)
+    resource_profile: ResourceProfile = Field(default_factory=ResourceProfile)
+
+    @field_validator("requires")
+    @classmethod
+    def unique_requires(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("requires contains duplicates")
+        return value
+
+
+class WorkflowPlan(StrictModel):
+    plan_version: Literal["1.0"] = "1.0"
+    strategy_id: str = Field(min_length=1, max_length=120)
+    steps: list[WorkflowStep] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_dag(self) -> "WorkflowPlan":
+        ids = [step.step_id for step in self.steps]
+        if len(ids) != len(set(ids)):
+            raise ValueError("step_id values must be unique")
+        seen: set[str] = set()
+        for step in self.steps:
+            missing = set(step.requires) - seen
+            if missing:
+                raise ValueError(f"{step.step_id} depends on unknown or later steps: {sorted(missing)}")
+            seen.add(step.step_id)
+        return self
+
+
+class PocketSpec(StrictModel):
+    center: tuple[float, float, float] | None = None
+    size: tuple[float, float, float] = (24.0, 24.0, 24.0)
+    key_residues: list[str] = Field(default_factory=list)
+    cocrystal_ligand: str | None = None
+
+
+class TaskRequest(StrictModel):
+    query: str = Field(min_length=10, max_length=5000)
+    protein_path: str
+    library_path: str
+    pocket: PocketSpec = Field(default_factory=PocketSpec)
+    known_actives_path: str | None = None
+    ph: float = Field(default=7.4, ge=0.0, le=14.0)
+    cpu_only: bool = False
+    resume: bool = True
+
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    QUARANTINED = "quarantined"
+    CANCELLED = "cancelled"
+
+
+class JobRecord(StrictModel):
+    job_id: str
+    task_id: str
+    step_id: str
+    action_type: ActionType
+    status: JobStatus
+    attempt: int = 0
+    slurm_job_id: str | None = None
+    message: str = ""
+    created_at: str
+    updated_at: str
+
+
+class ToolCapability(StrictModel):
+    action_type: ActionType
+    name: str
+    description: str
+    availability: Literal["available", "degraded", "unavailable"]
+    executor: Literal["python", "conda", "slurm", "apptainer"]
+    input_formats: list[str]
+    output_formats: list[str]
+    gpu_required: bool = False
+    reason: str = ""
+
+
+class MoleculeResult(StrictModel):
+    source_id: str
+    smiles: str
+    docking_affinity: float | None = None
+    cnn_score: float | None = None
+    cnn_affinity: float | None = None
+    cnn_vs: float | None = None
+    plip_score: float | None = None
+    admet_risk: float | None = None
+    scaffold: str = ""
+    short_md_stable: bool | None = None
+    mmgbsa_delta_total: float | None = None
+    final_score: float | None = None
+    rank: int | None = None
+    status: JobStatus = JobStatus.SUCCEEDED
+    notes: list[str] = Field(default_factory=list)
+
+
+def ensure_existing_file(value: str, label: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"{label} does not exist or is not a file: {path}")
+    return path
+

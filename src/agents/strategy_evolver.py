@@ -17,6 +17,11 @@ EVOLVER_SYSTEM_PROMPT = """\
 2. 每个修改的 diagnosis_ref 必须指向诊断报告中的具体问题ID (如 concern-1, suggestion-2)
 3. 保留策略中未被诊断报告批评的部分 — 不要"顺手优化"
 4. 如果某个concern是根本性的(如靶点错配), 标注为不可修复
+5. 第一版只允许以下action_type: library_preparation, protein_preparation,
+   binding_site_detection, physicochemical_filtering, diversity_selection,
+   molecular_docking, interaction_analysis, admet_filtering,
+   molecular_dynamics, final_ranking, report_generation
+6. 禁止插入药效团、形状、共价、FEP、片段生长、生成式设计或人工目视检查步骤
 
 ## 输出JSON格式
 {

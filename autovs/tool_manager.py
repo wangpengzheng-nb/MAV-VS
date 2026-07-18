@@ -1,0 +1,304 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import threading
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any
+
+from autovs.capabilities import list_capabilities
+from autovs.config import Settings
+from autovs.db import StateStore
+from autovs.preparation import prepare_library, resolve_pocket
+from autovs.ranking import rank_csv
+from autovs.schemas import ActionType, JobRecord, JobStatus, WorkflowStep
+from autovs.security import ensure_within, run_argv, sha256_file
+
+
+class ToolManager:
+    def __init__(self, settings: Settings, store: StateStore):
+        self.settings, self.store = settings, store
+
+    @property
+    def allowed_roots(self) -> list[Path]:
+        return [self.settings.task_root, self.settings.config_path.parent.parent]
+
+    def submit(self, task_id: str, step: WorkflowStep, inputs: dict[str, Any], *, background: bool = True) -> JobRecord:
+        task = self.store.get_task(task_id)
+        if not task:
+            raise ValueError(f"unknown task_id: {task_id}")
+        checkpoint_key = self._checkpoint_key(step, inputs)
+        existing = self.store.find_checkpoint_job(task_id, step.step_id, checkpoint_key)
+        if existing and self._checkpoint_outputs_exist(existing.message):
+            return existing
+        job = self.store.create_job(task_id, step.step_id, step.action_type, command={"checkpoint_key": checkpoint_key})
+        if background:
+            threading.Thread(target=self._execute, args=(job.job_id, task, step, inputs), daemon=True).start()
+        else:
+            self._execute(job.job_id, task, step, inputs)
+        return self.store.get_job(job.job_id)  # type: ignore[return-value]
+
+    def _checkpoint_key(self, step: WorkflowStep, inputs: dict[str, Any]) -> str:
+        normalized = {"step": step.model_dump(mode="json"), "inputs": {}}
+        for key, value in sorted(inputs.items()):
+            if isinstance(value, str):
+                candidate = Path(value)
+                normalized["inputs"][key] = {"path": value, "sha256": sha256_file(candidate) if candidate.is_file() else None}
+            else:
+                normalized["inputs"][key] = value
+        return hashlib.sha256(json.dumps(normalized, sort_keys=True, default=str).encode()).hexdigest()
+
+    @staticmethod
+    def _checkpoint_outputs_exist(message: str) -> bool:
+        try:
+            outputs = json.loads(message)
+        except json.JSONDecodeError:
+            return False
+        paths = [Path(value) for value in outputs.values() if isinstance(value, str) and ("/" in value or "\\" in value)]
+        return bool(paths) and all(path.exists() for path in paths)
+
+    def _execute(self, job_id: str, task: dict, step: WorkflowStep, inputs: dict[str, Any]) -> None:
+        self.store.update_job(job_id, JobStatus.RUNNING)
+        task_dir = ensure_within(task["task_dir"], [self.settings.task_root], must_exist=True)
+        work_dir = task_dir / "steps" / step.step_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            outputs = self._dispatch(step, inputs, work_dir)
+            for name, value in outputs.items():
+                if isinstance(value, Path) and value.is_file():
+                    self.store.add_artifact(task["task_id"], job_id, name, value, value.suffix.lstrip(".").upper(), sha256_file(value))
+            self.store.update_job(job_id, JobStatus.SUCCEEDED, message=json.dumps(_jsonable(outputs), ensure_ascii=False))
+        except Exception as exc:
+            self.store.update_job(job_id, JobStatus.FAILED, message=f"{type(exc).__name__}: {exc}")
+
+    def _dispatch(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        action = step.action_type
+        if action == ActionType.INPUT_VALIDATION:
+            protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+            library = ensure_within(inputs["library_path"], self.allowed_roots, must_exist=True)
+            if protein.suffix.lower() != ".pdb":
+                raise ValueError("protein must be a PDB file")
+            if library.suffix.lower() not in {".smi", ".smiles", ".txt", ".csv", ".sdf"}:
+                raise ValueError("library must be SMI, CSV, or SDF")
+            output = work_dir / "input_validation.json"
+            output.write_text(json.dumps({"protein": str(protein), "library": str(library),
+                                          "protein_sha256": sha256_file(protein), "library_sha256": sha256_file(library)}, indent=2), encoding="utf-8")
+            return {"validation": output}
+        if action == ActionType.POCKET_DEFINITION:
+            protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+            pocket = resolve_pocket(protein, center=inputs.get("center"), size=tuple(inputs.get("size", (24, 24, 24))),
+                                    key_residues=list(inputs.get("key_residues", [])))
+            output = work_dir / "pocket.json"; output.write_text(json.dumps(pocket, indent=2), encoding="utf-8")
+            return {"pocket": output}
+        if action in {ActionType.MOLECULE_STANDARDIZATION, ActionType.CONFORMER_GENERATION, ActionType.PHYSICOCHEMICAL_FILTERING}:
+            library = ensure_within(inputs["library_path"], self.allowed_roots, must_exist=True)
+            return prepare_library(library, work_dir, max_molecules=int(self.settings.limit("max_library_molecules", 1_000_000)),
+                                   mw_range=tuple(step.parameters.get("mw_range", (150, 800))),
+                                   logp_range=tuple(step.parameters.get("logp_range", (-2, 8))))
+        if action == ActionType.PROTEIN_PREPARATION:
+            protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+            obabel = self.settings.executable("obabel")
+            if not obabel or not obabel.exists():
+                raise RuntimeError("OpenBabel is unavailable")
+            clean, pdbqt = work_dir / "receptor_clean.pdb", work_dir / "receptor.pdbqt"
+            result = run_argv([str(obabel), "-ipdb", str(protein), "-opdb", "-O", str(clean), "-h"], cwd=work_dir, timeout=1800, log_path=work_dir / "protein_prep.log")
+            if result.returncode:
+                raise RuntimeError(f"OpenBabel protein preparation failed: {result.stderr[-500:]}")
+            result = run_argv([str(obabel), "-ipdb", str(clean), "-opdbqt", "-O", str(pdbqt), "-xr"], cwd=work_dir, timeout=1800, log_path=work_dir / "pdbqt.log")
+            if result.returncode:
+                raise RuntimeError(f"PDBQT conversion failed: {result.stderr[-500:]}")
+            return {"receptor_pdb": clean, "receptor_pdbqt": pdbqt}
+        if action == ActionType.FINAL_RANKING:
+            score_csv = ensure_within(inputs["scores_csv"], [self.settings.task_root], must_exist=True)
+            output = work_dir / "top20.csv"
+            rows = rank_csv(score_csv, output, top_n=int(self.settings.limit("final_hits", 20)))
+            return {"top_hits": output, "hit_count": len(rows)}
+        if action == ActionType.MOLECULAR_DOCKING:
+            return self._run_smina(step, inputs, work_dir)
+        if action == ActionType.POSE_EXTRACTION:
+            return self._extract_poses(inputs, work_dir)
+        if action == ActionType.INTERACTION_ANALYSIS:
+            return self._run_plip(inputs, work_dir)
+        raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
+
+    def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        from rdkit import Chem
+        smina = self.settings.executable("smina")
+        if not smina or not smina.exists():
+            raise RuntimeError("smina binary unavailable")
+        receptor = ensure_within(inputs["receptor_pdbqt"], [self.settings.task_root], must_exist=True)
+        ligands = ensure_within(inputs["ligands_sdf"], [self.settings.task_root], must_exist=True)
+        center, size = inputs.get("center"), inputs.get("size", [24, 24, 24])
+        if not center or len(center) != 3:
+            raise ValueError("docking requires a three-value pocket center")
+        output, log = work_dir / "smina_poses.sdf", work_dir / "smina.log"
+        argv = [str(smina), "-r", str(receptor), "-l", str(ligands),
+                "--center_x", str(center[0]), "--center_y", str(center[1]), "--center_z", str(center[2]),
+                "--size_x", str(size[0]), "--size_y", str(size[1]), "--size_z", str(size[2]),
+                "--exhaustiveness", str(step.parameters.get("exhaustiveness", 4)),
+                "--num_modes", str(step.parameters.get("num_modes", 3)),
+                "--cpu", str(step.resource_profile.cpus), "--out", str(output)]
+        result = run_argv(argv, cwd=work_dir, timeout=step.resource_profile.timeout_seconds, log_path=log)
+        if result.returncode or not output.exists():
+            raise RuntimeError(f"smina failed: {result.stderr[-500:]}")
+        manifest_rows = {}
+        manifest_path = inputs.get("manifest_csv")
+        if manifest_path:
+            checked_manifest = ensure_within(manifest_path, [self.settings.task_root], must_exist=True)
+            with checked_manifest.open(encoding="utf-8-sig", newline="") as handle:
+                manifest_rows = {row["source_id"]: row for row in csv.DictReader(handle)}
+        scores_path = work_dir / "smina_scores.csv"
+        score_rows = []
+        best: dict[str, dict] = {}
+        for mol in Chem.SDMolSupplier(str(output), removeHs=False):
+            if mol is None:
+                continue
+            source_id = mol.GetProp("source_id") if mol.HasProp("source_id") else (mol.GetProp("_Name") if mol.HasProp("_Name") else "")
+            affinity = None
+            for prop in ("minimizedAffinity", "affinity", "SCORE"):
+                if mol.HasProp(prop):
+                    try:
+                        affinity = float(mol.GetProp(prop)); break
+                    except ValueError:
+                        pass
+            if affinity is None:
+                continue
+            row = dict(manifest_rows.get(source_id, {}))
+            row.update({"source_id": source_id, "smiles": row.get("smiles", Chem.MolToSmiles(Chem.RemoveHs(mol))),
+                        "docking_affinity": affinity})
+            if source_id not in best or affinity < float(best[source_id]["docking_affinity"]):
+                best[source_id] = row
+        score_rows = list(best.values())
+        if not score_rows:
+            raise RuntimeError("smina output contains no parseable molecule scores")
+        fields = list(dict.fromkeys(key for row in score_rows for key in row))
+        with scores_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(score_rows)
+        return {"docked_poses": output, "scores_csv": scores_path, "log": log}
+
+    def _extract_poses(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        from rdkit import Chem
+        receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
+        docked = ensure_within(inputs["docked_poses"], [self.settings.task_root], must_exist=True)
+        engine = str(inputs.get("engine", "smina"))
+        metric = str(inputs.get("pose_metric", "best_cnn_vs" if engine == "gnina" else "best_affinity"))
+        best: dict[str, tuple[float, Any]] = {}
+        for mol in Chem.SDMolSupplier(str(docked), removeHs=False):
+            if mol is None:
+                continue
+            source_id = mol.GetProp("source_id") if mol.HasProp("source_id") else (mol.GetProp("_Name") if mol.HasProp("_Name") else "")
+            try:
+                if metric == "best_cnn_vs":
+                    value = float(mol.GetProp("CNNscore")) * float(mol.GetProp("CNNaffinity")); better = lambda new, old: new > old
+                else:
+                    for prop in ("minimizedAffinity", "affinity", "SCORE"):
+                        if mol.HasProp(prop):
+                            value = float(mol.GetProp(prop)); break
+                    else:
+                        continue
+                    better = lambda new, old: new < old
+            except (ValueError, KeyError):
+                continue
+            if source_id not in best or better(value, best[source_id][0]):
+                best[source_id] = (value, Chem.Mol(mol))
+        if not best:
+            raise RuntimeError("no representative docking poses could be selected")
+        selected_sdf = work_dir / "selected_poses.sdf"
+        writer = Chem.SDWriter(str(selected_sdf))
+        receptor_text = receptor.read_text(errors="ignore")
+        receptor_body = "\n".join(line for line in receptor_text.splitlines() if not line.startswith("END")) + "\n"
+        complexes = work_dir / "complexes"; complexes.mkdir(exist_ok=True)
+        index_path = work_dir / "complex_index.csv"
+        rows = []
+        for source_id, (metric_value, mol) in sorted(best.items()):
+            writer.write(mol)
+            ligand_block = Chem.MolToPDBBlock(mol)
+            complex_path = complexes / f"{source_id}.pdb"
+            complex_path.write_text(receptor_body + ligand_block, encoding="utf-8")
+            rows.append({"source_id": source_id, "complex_pdb": str(complex_path), "pose_metric": metric, "pose_metric_value": metric_value})
+        writer.close()
+        with index_path.open("w", encoding="utf-8", newline="") as handle:
+            out = csv.DictWriter(handle, fieldnames=list(rows[0])); out.writeheader(); out.writerows(rows)
+        return {"selected_poses": selected_sdf, "complex_index": index_path, "complex_count": len(rows)}
+
+    def _run_plip(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        plip = self.settings.executable("plip")
+        if not plip or not plip.exists():
+            raise RuntimeError("PLIP binary unavailable")
+        index = ensure_within(inputs["complex_index"], [self.settings.task_root], must_exist=True)
+        key_residues = {_normalize_residue(x) for x in inputs.get("key_residues", [])}
+        output_root = work_dir / "raw"; output_root.mkdir(exist_ok=True)
+        summaries, failures = [], []
+        with index.open(encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        for row in rows:
+            source_id = row["source_id"]
+            complex_path = ensure_within(row["complex_pdb"], [self.settings.task_root], must_exist=True)
+            out_dir = output_root / source_id; out_dir.mkdir(exist_ok=True)
+            log = out_dir / "plip.runner.log"
+            result = run_argv([str(plip), "-f", str(complex_path), "-o", str(out_dir), "-x", "-t", "--maxthreads", "1"],
+                              cwd=out_dir, timeout=1800, log_path=log)
+            report_xml = out_dir / "report.xml"
+            if not report_xml.exists():
+                matches = sorted(out_dir.glob("*_report.xml"))
+                report_xml = matches[0] if matches else report_xml
+            if result.returncode or not report_xml.exists():
+                failures.append({"source_id": source_id, "reason": result.stderr[-500:] or "report.xml missing"})
+                continue
+            summary = _score_plip_xml(report_xml, key_residues)
+            report_txt = out_dir / "report.txt"
+            if not report_txt.exists():
+                text_matches = sorted(out_dir.glob("*_report.txt"))
+                report_txt = text_matches[0] if text_matches else report_txt
+            summary.update({"source_id": source_id, "report_xml": str(report_xml), "report_txt": str(report_txt)})
+            summaries.append(summary)
+        if not summaries:
+            raise RuntimeError(f"PLIP produced no successful reports; failures={len(failures)}")
+        scores = work_dir / "plip_scores.csv"; failed = work_dir / "failed.csv"
+        with scores.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(summaries[0])); writer.writeheader(); writer.writerows(summaries)
+        with failed.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["source_id", "reason"]); writer.writeheader(); writer.writerows(failures)
+        return {"plip_scores": scores, "failed": failed, "success_count": len(summaries), "failed_count": len(failures)}
+
+
+def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:
+    return {key: str(value) if isinstance(value, Path) else value for key, value in outputs.items()}
+
+
+def _normalize_residue(value: str) -> str:
+    return value.upper().replace(":", "").replace(" ", "")
+
+
+def _score_plip_xml(path: Path, key_residues: set[str]) -> dict[str, Any]:
+    root = ET.parse(path).getroot()
+    score, hbonds, key_hbonds, hydrophobic, salt_bridges = 0, [], [], 0, 0
+    for node in root.iter():
+        tag = node.tag.split("}")[-1].lower()
+        if tag not in {"hydrogen_bond", "hydrophobic_interaction", "salt_bridge", "pi_stack", "pi_cation_interaction", "halogen_bond"}:
+            continue
+        text = {child.tag.split("}")[-1].lower(): (child.text or "").strip() for child in node}
+        residue = _normalize_residue(f"{text.get('restype', '')}{text.get('resnr', '')}{text.get('reschain', '')}")
+        residue_no_chain = _normalize_residue(f"{text.get('restype', '')}{text.get('resnr', '')}")
+        if tag == "hydrogen_bond":
+            hbonds.append(residue)
+            if residue in key_residues or residue_no_chain in key_residues:
+                score += 3; key_hbonds.append(residue)
+            else:
+                try:
+                    distance = float(text.get("dist_h-a") or text.get("dist_d-a") or 99)
+                except ValueError:
+                    distance = 99
+                if distance <= 3.5:
+                    score += 2
+        elif tag == "hydrophobic_interaction":
+            score += 1; hydrophobic += 1
+        elif tag == "salt_bridge":
+            score += 3; salt_bridges += 1
+        else:
+            score += 2
+    return {"plip_score": score, "hbond_count": len(hbonds), "key_hbond_count": len(key_hbonds),
+            "key_hbond_residues": ";".join(sorted(set(key_hbonds))), "all_hbond_residues": ";".join(sorted(set(hbonds))),
+            "hydrophobic_count": hydrophobic, "salt_bridge_count": salt_bridges}

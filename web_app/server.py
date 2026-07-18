@@ -1,191 +1,124 @@
-"""
-Web Server — FastAPI + SSE 实时进度推送
-=========================================
-"""
 from __future__ import annotations
-import os, sys, json, uuid, queue, threading, hashlib
-from datetime import datetime
-from typing import Dict
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+import asyncio
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 
-# 确保项目根目录在 path 中
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PROJECT_ROOT)
+from autovs.pipeline import PipelineService
+from autovs.schemas import PocketSpec, TaskRequest
+from autovs.security import ensure_within
 
-from dotenv import load_dotenv
-load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-from web_app.pipeline_runner import PipelineRunner
-
-app = FastAPI(title="AutoVS-Agent Web", version="3.0")
-
-# CORS
-app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                   allow_methods=["*"], allow_headers=["*"])
-
-# 静态文件
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+service = PipelineService()
+app = FastAPI(title="AutoVS-Agent", version="0.1.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# 任务输出目录
-OUTPUT_BASE = os.path.join(PROJECT_ROOT, "分析文件")
-
-# 全局状态
-progress_queues: Dict[str, queue.Queue] = {}
-task_results: Dict[str, dict] = {}
-task_status: Dict[str, str] = {}  # "running" | "done" | "error"
-
-
-def make_task_dir(query: str) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    h = hashlib.md5(query.encode()).hexdigest()[:8]
-    d = os.path.join(OUTPUT_BASE, f"任务_{ts}_{h}")
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "query.txt"), "w") as f:
-        f.write(query)
-    return d
-
-
-# =========================================================================
-# API 路由
-# =========================================================================
 
 @app.get("/")
-async def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
-
-
-@app.post("/api/run")
-async def run_pipeline(request: Request):
-    """启动流水线, 返回 task_id。"""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    query = (body.get("query") or "").strip()
-    prior_knowledge = (body.get("prior_knowledge") or "").strip()
-    if not query:
-        raise HTTPException(400, "任务描述不能为空")
-    if len(query) < 10:
-        raise HTTPException(400, "任务描述至少10个字符")
-
-    task_id = str(uuid.uuid4())[:12]
-    q = queue.Queue()
-    progress_queues[task_id] = q
-    task_status[task_id] = "running"
-
-    task_dir = make_task_dir(query)
-
-    def on_progress(step: str, status: str, percent: int, msg: str = ""):
-        q.put({
-            "task_id": task_id,
-            "step": step,
-            "status": status,
-            "percent": percent,
-            "message": msg,
-        })
-
-    def run_in_thread():
-        try:
-            runner = PipelineRunner(progress_callback=on_progress)
-            result = runner.run(query, task_dir, prior_knowledge=prior_knowledge)
-            task_results[task_id] = result
-            task_status[task_id] = "done"
-            # 发送完成信号
-            q.put({
-                "task_id": task_id,
-                "step": "输出结果",
-                "status": "done",
-                "percent": 100,
-                "message": "完成!",
-            })
-        except Exception as e:
-            task_status[task_id] = "error"
-            q.put({
-                "task_id": task_id,
-                "step": "错误",
-                "status": "error",
-                "percent": 0,
-                "message": str(e)[:500],
-            })
-        finally:
-            # 清理 queue 引用 (但保留10分钟供客户端读取)
-            # queue 在 stream 结束后由垃圾回收处理
-            pass
-
-    thread = threading.Thread(target=run_in_thread, daemon=True)
-    thread.start()
-
-    return {"task_id": task_id, "status": "started"}
-
-
-@app.get("/api/progress/{task_id}")
-async def stream_progress(task_id: str):
-    """SSE 流式推送进度。"""
-    async def generate():
-        q = progress_queues.get(task_id)
-        if q is None:
-            status = task_status.get(task_id, "unknown")
-            yield f"data: {json.dumps({'status': status, 'percent': 100 if status == 'done' else 0, 'step': '?', 'message': f'任务{status}'})}\n\n"
-            return
-
-        last_data = None
-        while True:
-            try:
-                data = q.get(timeout=2)
-                # 去重: 相同进度不重复推送
-                key = (data.get("step"), data.get("percent"))
-                if key == last_data:
-                    continue
-                last_data = key
-                yield f"data: {json.dumps(data)}\n\n"
-                if data.get("status") in ("done", "error") and data.get("percent", 0) >= 100:
-                    break
-            except queue.Empty:
-                yield ": heartbeat\n\n"
-                # 检查任务是否已完成但队列为空
-                if task_status.get(task_id) in ("done", "error"):
-                    break
-
-        # 清理
-        progress_queues.pop(task_id, None)
-
-    return StreamingResponse(generate(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
-
-
-@app.get("/api/result/{task_id}")
-async def get_result(task_id: str):
-    """获取最终结果。"""
-    status = task_status.get(task_id, "unknown")
-    if status == "running":
-        return {"status": "running", "message": "任务仍在运行中"}
-    if status == "error":
-        return {"status": "error", "message": "任务执行失败"}
-    result = task_results.get(task_id)
-    if not result:
-        raise HTTPException(404, "任务不存在")
-    return {"status": "done", "result": result}
+def index():
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/api/health")
-async def health():
-    return {
-        "status": "ok",
-        "active_tasks": sum(1 for s in task_status.values() if s == "running"),
-        "completed_tasks": sum(1 for s in task_status.values() if s == "done"),
-    }
+def health():
+    from autovs.capabilities import health_report
+    return health_report(service.settings)
+
+
+@app.post("/api/tasks")
+async def create_task(
+    query: str = Form(...), protein: UploadFile = File(...), library: UploadFile = File(...),
+    center: str = Form(""), size: str = Form("24,24,24"), key_residues: str = Form(""),
+    ph: float = Form(7.4), cpu_only: bool = Form(False), baseline: bool = Form(False),
+):
+    if len(query.strip()) < 10:
+        raise HTTPException(400, "任务描述至少10个字符")
+    upload_dir = Path(tempfile.mkdtemp(prefix="autovs_upload_", dir=service.settings.task_root))
+    protein_path = upload_dir / f"protein{Path(protein.filename or '.pdb').suffix.lower()}"
+    library_path = upload_dir / f"library{Path(library.filename or '.smi').suffix.lower()}"
+    with protein_path.open("wb") as out:
+        shutil.copyfileobj(protein.file, out)
+    with library_path.open("wb") as out:
+        shutil.copyfileobj(library.file, out)
+    try:
+        center_value = tuple(float(x) for x in center.split(",")) if center.strip() else None
+        size_value = tuple(float(x) for x in size.split(","))
+        if center_value is not None and len(center_value) != 3 or len(size_value) != 3:
+            raise ValueError("center and size require three comma-separated numbers")
+        request = TaskRequest(query=query, protein_path=str(protein_path), library_path=str(library_path),
+                              pocket=PocketSpec(center=center_value, size=size_value,
+                                                key_residues=[x.strip() for x in key_residues.split(",") if x.strip()]),
+                              ph=ph, cpu_only=cpu_only)
+        task_id = service.submit(request, use_llm_planning=not baseline)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+    return {"task_id": task_id, "status": "pending"}
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str):
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
+@app.post("/api/tasks/{task_id}/resume")
+def resume_task(task_id: str):
+    try:
+        service.resume(task_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/progress/{task_id}")
+async def progress(task_id: str):
+    async def events():
+        while True:
+            task = service.get_task(task_id)
+            if not task:
+                yield f"data: {json.dumps({'status':'error','message':'任务不存在'}, ensure_ascii=False)}\n\n"; return
+            jobs = task.get("jobs", [])
+            completed = sum(job["status"] in {"succeeded", "failed", "skipped", "quarantined", "cancelled"} for job in jobs)
+            percent = min(99, int(100 * completed / max(1, len(jobs) + (0 if task["status"] in {"succeeded", "failed"} else 1))))
+            terminal = task["status"] in {"succeeded", "failed"}
+            payload = {"task_id": task_id, "status": "done" if task["status"] == "succeeded" else ("error" if task["status"] == "failed" else "running"),
+                       "percent": 100 if terminal else percent, "step": jobs[-1]["step_id"] if jobs else "planning",
+                       "message": task.get("error") or task["status"]}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            if terminal:
+                return
+            await asyncio.sleep(2)
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/result/{task_id}")
+def result(task_id: str):
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return {"status": "done" if task["status"] == "succeeded" else task["status"], "result": task.get("result"), "error": task.get("error")}
+
+
+@app.get("/api/tasks/{task_id}/artifacts/{artifact_id}")
+def download_artifact(task_id: str, artifact_id: int):
+    artifact = next((item for item in service.store.list_artifacts(task_id) if item["artifact_id"] == artifact_id), None)
+    if not artifact:
+        raise HTTPException(404, "产物不存在")
+    path = ensure_within(artifact["path"], [service.settings.task_root], must_exist=True)
+    return FileResponse(path, filename=path.name)
 
 
 if __name__ == "__main__":
     import uvicorn
-    print("=" * 60)
-    print("  AutoVS-Agent Web Server v3.0")
-    print("  访问: http://localhost:8080")
-    print("=" * 60)
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=8080)

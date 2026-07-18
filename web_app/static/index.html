@@ -20,6 +20,16 @@
     <div class="input-wrapper">
       <textarea id="queryInput" rows="3"
         placeholder="请输入虚拟筛选任务，例如：&#10;寻找针对突变型IDH1(R132H)的变构抑制剂&#10;筛选能够同时激活核受体NURR1并抑制单胺氧化酶MAO-B的双靶点分子，用于帕金森病"></textarea>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0">
+        <label>蛋白 PDB<input id="proteinInput" type="file" accept=".pdb" required></label>
+        <label>分子库<input id="libraryInput" type="file" accept=".smi,.smiles,.csv,.sdf" required></label>
+        <label>口袋中心（可选，x,y,z）<input id="centerInput" type="text" placeholder="-15.36,2.24,-9.56"></label>
+        <label>关键残基（可选，逗号分隔）<input id="residueInput" type="text" placeholder="ASP103,TRP144,GLY145"></label>
+      </div>
+      <div style="display:flex;gap:18px;margin-bottom:12px">
+        <label><input id="cpuOnly" type="checkbox"> CPU-only</label>
+        <label><input id="baselineMode" type="checkbox"> 基础链路诊断（跳过LLM规划）</label>
+      </div>
       <button id="runBtn" onclick="startPipeline()">
         <span class="btn-icon">🚀</span> 开始虚拟筛选
       </button>
@@ -29,6 +39,7 @@
   <!-- 进度条 -->
   <section class="progress-section" id="progressSection" style="display:none">
     <h3>运行进度</h3>
+    <p>Task ID: <code id="taskId"></code></p>
     <div class="progress-track">
       <div class="progress-nodes" id="progressNodes">
         <div class="pnode" data-step="靶点调研">

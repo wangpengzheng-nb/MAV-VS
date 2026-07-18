@@ -30,6 +30,8 @@ env/
 
 # ── 运行时输出 ──
 分析文件/
+runtime/
+containers/*.sif
 *.log
 *.tmp
 

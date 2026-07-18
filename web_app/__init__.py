@@ -1,0 +1,1 @@
+"""AutoVS web application package."""
