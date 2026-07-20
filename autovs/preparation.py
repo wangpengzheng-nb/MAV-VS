@@ -140,32 +140,3 @@ def prepare_library(input_path: Path, output_dir: Path, *, max_molecules: int = 
     return {"prepared_library": combined, "manifest": manifest, "failed": failed,
             "summary": summary, "prepared_count": len(ok_rows), "failed_count": len(failed_rows)}
 
-
-def resolve_pocket(protein_path: Path, *, center: tuple[float, float, float] | None,
-                   size: tuple[float, float, float], key_residues: list[str]) -> dict:
-    if center is not None:
-        return {"center": list(center), "size": list(size), "source": "user_coordinates"}
-    atoms: list[tuple[float, float, float]] = []
-    residue_keys = {item.upper().replace(":", "") for item in key_residues}
-    hetero: list[tuple[float, float, float]] = []
-    with protein_path.open(errors="ignore") as handle:
-        for line in handle:
-            if not line.startswith(("ATOM  ", "HETATM")) or len(line) < 54:
-                continue
-            try:
-                xyz = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
-            except ValueError:
-                continue
-            resname, resid, chain = line[17:20].strip().upper(), line[22:26].strip(), line[21:22].strip().upper()
-            if f"{resname}{resid}" in residue_keys or f"{resname}{resid}{chain}" in residue_keys:
-                atoms.append(xyz)
-            if line.startswith("HETATM") and resname not in {"HOH", "WAT", "NA", "CL"}:
-                hetero.append(xyz)
-    selected, source = (atoms, "key_residues") if atoms else (hetero, "cocrystal_ligand")
-    if not selected:
-        raise ValueError("pocket unresolved: provide coordinates, key residues, cocrystal ligand, or configure Fpocket")
-    return {
-        "center": [round(sum(p[i] for p in selected) / len(selected), 3) for i in range(3)],
-        "size": list(size), "source": source, "atom_count": len(selected),
-    }
-

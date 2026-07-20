@@ -36,6 +36,7 @@ def health():
 async def create_task(
     query: str = Form(...), protein: UploadFile = File(...), library: UploadFile = File(...),
     center: str = Form(""), size: str = Form("24,24,24"), key_residues: str = Form(""),
+    ligand_id: str = Form(""),
     ph: float = Form(7.4), cpu_only: bool = Form(False), baseline: bool = Form(False),
 ):
     if len(query.strip()) < 10:
@@ -54,7 +55,8 @@ async def create_task(
             raise ValueError("center and size require three comma-separated numbers")
         request = TaskRequest(query=query, protein_path=str(protein_path), library_path=str(library_path),
                               pocket=PocketSpec(center=center_value, size=size_value,
-                                                key_residues=[x.strip() for x in key_residues.split(",") if x.strip()]),
+                                                key_residues=[x.strip() for x in key_residues.split(",") if x.strip()],
+                                                cocrystal_ligand=ligand_id.strip() or None),
                               ph=ph, cpu_only=cpu_only)
         task_id = service.submit(request, use_llm_planning=not baseline)
     except Exception as exc:

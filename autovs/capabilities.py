@@ -10,7 +10,7 @@ from autovs.schemas import ActionType, ToolCapability
 CAPABILITY_DEFINITIONS = {
     ActionType.INPUT_VALIDATION: ("Input validator", "Validate PDB and molecular library inputs", "python", ["PDB", "SMI", "CSV", "SDF"], ["JSON"], False),
     ActionType.PROTEIN_PREPARATION: ("OpenBabel protein preparation", "Remove water, add hydrogens and produce receptor files", "conda", ["PDB"], ["PDB", "PDBQT"], False),
-    ActionType.POCKET_DEFINITION: ("Pocket resolver", "Resolve pocket from user box, cocrystal, residues, or Fpocket", "python", ["PDB"], ["JSON"], False),
+    ActionType.POCKET_DEFINITION: ("Evidence-backed pocket resolver", "Resolve and validate a pocket from a user box, uploaded cocrystal ligand, verified research structure, or mapped key residues", "python", ["PDB", "JSON"], ["JSON"], False),
     ActionType.MOLECULE_STANDARDIZATION: ("RDKit standardization", "Canonicalize, deduplicate, filter and assign stable IDs", "python", ["SMI", "CSV", "SDF"], ["CSV", "SDF"], False),
     ActionType.CONFORMER_GENERATION: ("RDKit ETKDGv3", "Generate explicit-H 3D conformers with MMFF94s/UFF", "python", ["SMI", "CSV", "SDF"], ["SDF", "CSV"], False),
     ActionType.PHYSICOCHEMICAL_FILTERING: ("RDKit filters", "Apply physicochemical, PAINS and reactive-group gates", "python", ["SMI", "CSV", "SDF"], ["CSV", "SDF"], False),
@@ -41,6 +41,8 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 availability, reason = "unavailable", "neither smina nor GNINA is configured"
             elif not _exists(gnina):
                 availability, reason = "degraded", "GNINA unavailable; CPU smina only"
+        elif action == ActionType.POCKET_DEFINITION and not _exists(settings.executable("plip")):
+            availability, reason = "degraded", "PLIP unavailable; geometric ligand-contact validation remains available"
         elif action == ActionType.INTERACTION_ANALYSIS and not _exists(settings.executable("plip")):
             availability, reason = "unavailable", "PLIP binary not found"
         elif action == ActionType.PROTEIN_PREPARATION and not _exists(settings.executable("obabel")):

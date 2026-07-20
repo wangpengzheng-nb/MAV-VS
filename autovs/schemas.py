@@ -87,6 +87,70 @@ class PocketSpec(StrictModel):
     key_residues: list[str] = Field(default_factory=list)
     cocrystal_ligand: str | None = None
 
+    @field_validator("size")
+    @classmethod
+    def valid_box_size(cls, value: tuple[float, float, float]) -> tuple[float, float, float]:
+        if any(axis < 8.0 or axis > 60.0 for axis in value):
+            raise ValueError("pocket box dimensions must each be between 8 and 60 Angstrom")
+        return value
+
+
+class PocketSource(str, Enum):
+    USER_COORDINATES = "user_coordinates"
+    COCRYSTAL_LIGAND = "cocrystal_ligand"
+    VERIFIED_RESEARCH_STRUCTURE = "verified_research_structure"
+    KEY_RESIDUES = "key_residues"
+
+
+class PocketConfidence(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class PocketEvidence(StrictModel):
+    kind: str = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=1000)
+    value: float | str | bool | None = None
+
+
+class PocketQualityGate(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    status: Literal["passed", "degraded", "failed", "not_run"]
+    detail: str = Field(default="", max_length=1000)
+
+
+class PocketCandidate(StrictModel):
+    pocket_id: str = Field(pattern=r"^pocket_[a-f0-9]{12}$")
+    rank: int = Field(ge=1)
+    center: tuple[float, float, float]
+    size: tuple[float, float, float]
+    source: PocketSource
+    confidence: PocketConfidence
+    chain_ids: list[str] = Field(default_factory=list)
+    residues: list[str] = Field(default_factory=list)
+    evidence: list[PocketEvidence] = Field(default_factory=list)
+    quality_gates: list[PocketQualityGate] = Field(default_factory=list)
+    tool_versions: dict[str, str] = Field(default_factory=dict)
+
+
+class PocketResolution(StrictModel):
+    resolution_version: Literal["1.0"] = "1.0"
+    protein_path: str
+    selected_pocket: PocketCandidate
+    alternate_pockets: list[PocketCandidate] = Field(default_factory=list, max_length=2)
+    research_pdb_id: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def selected_must_be_usable(self) -> "PocketResolution":
+        if self.selected_pocket.confidence == PocketConfidence.LOW:
+            raise ValueError("selected pocket cannot have low confidence")
+        ids = [self.selected_pocket.pocket_id, *(item.pocket_id for item in self.alternate_pockets)]
+        if len(ids) != len(set(ids)):
+            raise ValueError("pocket ids must be unique")
+        return self
+
 
 class TaskRequest(StrictModel):
     query: str = Field(min_length=10, max_length=5000)
@@ -157,4 +221,3 @@ def ensure_existing_file(value: str, label: str) -> Path:
     if not path.is_file():
         raise ValueError(f"{label} does not exist or is not a file: {path}")
     return path
-

@@ -11,7 +11,8 @@ from typing import Any
 from autovs.capabilities import list_capabilities
 from autovs.config import Settings
 from autovs.db import StateStore
-from autovs.preparation import prepare_library, resolve_pocket
+from autovs.pocket import resolve_pocket
+from autovs.preparation import prepare_library
 from autovs.ranking import rank_csv
 from autovs.schemas import ActionType, JobRecord, JobStatus, WorkflowStep
 from autovs.security import ensure_within, run_argv, sha256_file
@@ -79,7 +80,9 @@ class ToolManager:
             protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
             library = ensure_within(inputs["library_path"], self.allowed_roots, must_exist=True)
             if protein.suffix.lower() != ".pdb":
-                raise ValueError("protein must be a PDB file")
+                raise ValueError("protein must be a preprocessed PDB file")
+            if not any(line.startswith("ATOM  ") for line in protein.read_text(errors="ignore").splitlines()):
+                raise ValueError("protein PDB contains no ATOM records")
             if library.suffix.lower() not in {".smi", ".smiles", ".txt", ".csv", ".sdf"}:
                 raise ValueError("library must be SMI, CSV, or SDF")
             output = work_dir / "input_validation.json"
@@ -88,9 +91,22 @@ class ToolManager:
             return {"validation": output}
         if action == ActionType.POCKET_DEFINITION:
             protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+            if "research" in inputs:
+                raise ValueError("inline research is forbidden; use a checksummed research_path from the task directory")
+            research: dict[str, Any] = {}
+            research_path = inputs.get("research_path")
+            if research_path:
+                task_dir = work_dir.parent.parent
+                verified_research = ensure_within(research_path, [task_dir], must_exist=True)
+                research = json.loads(verified_research.read_text(encoding="utf-8"))
+                if not isinstance(research, dict):
+                    raise ValueError("research artifact must contain a JSON object")
             pocket = resolve_pocket(protein, center=inputs.get("center"), size=tuple(inputs.get("size", (24, 24, 24))),
-                                    key_residues=list(inputs.get("key_residues", [])))
-            output = work_dir / "pocket.json"; output.write_text(json.dumps(pocket, indent=2), encoding="utf-8")
+                                    key_residues=list(inputs.get("key_residues", [])),
+                                    cocrystal_ligand=inputs.get("cocrystal_ligand"), research=research,
+                                    work_dir=work_dir, plip_path=self.settings.executable("plip"))
+            output = work_dir / "pocket.json"
+            output.write_text(pocket.model_dump_json(indent=2), encoding="utf-8")
             return {"pocket": output}
         if action in {ActionType.MOLECULE_STANDARDIZATION, ActionType.CONFORMER_GENERATION, ActionType.PHYSICOCHEMICAL_FILTERING}:
             library = ensure_within(inputs["library_path"], self.allowed_roots, must_exist=True)
@@ -103,7 +119,12 @@ class ToolManager:
             if not obabel or not obabel.exists():
                 raise RuntimeError("OpenBabel is unavailable")
             clean, pdbqt = work_dir / "receptor_clean.pdb", work_dir / "receptor.pdbqt"
-            result = run_argv([str(obabel), "-ipdb", str(protein), "-opdb", "-O", str(clean), "-h"], cwd=work_dir, timeout=1800, log_path=work_dir / "protein_prep.log")
+            protein_only = work_dir / "protein_only_input.pdb"
+            protein_lines = [line for line in protein.read_text(errors="ignore").splitlines() if line.startswith("ATOM  ")]
+            if not protein_lines:
+                raise ValueError("protein preparation found no ATOM records")
+            protein_only.write_text("\n".join(protein_lines) + "\nEND\n", encoding="utf-8")
+            result = run_argv([str(obabel), "-ipdb", str(protein_only), "-opdb", "-O", str(clean), "-h"], cwd=work_dir, timeout=1800, log_path=work_dir / "protein_prep.log")
             if result.returncode:
                 raise RuntimeError(f"OpenBabel protein preparation failed: {result.stderr[-500:]}")
             result = run_argv([str(obabel), "-ipdb", str(clean), "-opdbqt", "-O", str(pdbqt), "-xr"], cwd=work_dir, timeout=1800, log_path=work_dir / "pdbqt.log")

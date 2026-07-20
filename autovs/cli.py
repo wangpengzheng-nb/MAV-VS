@@ -15,9 +15,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autovs", description="AutoVS-Agent unattended virtual screening")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="submit a virtual-screening task")
-    run.add_argument("--query", required=True); run.add_argument("--protein", required=True); run.add_argument("--library", required=True)
+    run.add_argument("--query", required=True); run.add_argument("--protein", "--structure", dest="protein", required=True); run.add_argument("--library", required=True)
     run.add_argument("--center", nargs=3, type=float); run.add_argument("--size", nargs=3, type=float, default=[24, 24, 24])
     run.add_argument("--key-residue", action="append", default=[]); run.add_argument("--ph", type=float, default=7.4)
+    run.add_argument("--ligand-id", help="optional cocrystal selector, e.g. VEN:A:201")
     run.add_argument("--cpu-only", action="store_true"); run.add_argument("--baseline", action="store_true", help="skip LLM planning for CPU diagnostics")
     run.add_argument("--wait", action="store_true")
     for name in ("status", "resume", "report"):
@@ -33,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(health_report(settings), ensure_ascii=False, indent=2)); return 0
     if args.command == "run":
         request = TaskRequest(query=args.query, protein_path=args.protein, library_path=args.library,
-                              pocket=PocketSpec(center=tuple(args.center) if args.center else None, size=tuple(args.size), key_residues=args.key_residue),
+                              pocket=PocketSpec(center=tuple(args.center) if args.center else None, size=tuple(args.size),
+                                                key_residues=args.key_residue, cocrystal_ligand=args.ligand_id),
                               ph=args.ph, cpu_only=args.cpu_only)
         if args.wait:
             result = service.run_sync(request, use_llm_planning=not args.baseline)

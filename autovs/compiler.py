@@ -53,7 +53,7 @@ def compile_strategy(strategy: dict[str, Any]) -> WorkflowPlan:
         if raw_action in UNSUPPORTED_V1:
             raise ValueError(f"unsupported v1 action: {raw_action}")
         try:
-            action = ALIASES.get(raw_action, ActionType(raw_action))
+            action = ALIASES[raw_action] if raw_action in ALIASES else ActionType(raw_action)
         except ValueError as exc:
             raise ValueError(f"unknown action_type: {raw_action}") from exc
         step_id = _slug(str(raw.get("step_id") or raw.get("id") or f"strategy-{index}"), f"strategy-{index}")
@@ -75,6 +75,10 @@ def compile_strategy(strategy: dict[str, Any]) -> WorkflowPlan:
             resource_profile=ResourceProfile(executor=executor, environment=environment, gpu_required=gpu),
         ))
         previous = step_id
+
+    # Pocket resolution is a deterministic scientific preflight owned by PipelineService.
+    # LLM-authored copies (and their coordinates/parameters) are never executable.
+    converted = [step for step in converted if step.action_type != ActionType.POCKET_DEFINITION]
 
     mandatory_prefix = [
         WorkflowStep(step_id="input-validation", action_type=ActionType.INPUT_VALIDATION),
@@ -113,4 +117,3 @@ def choose_executable_strategy(ranked_names: list[str], strategies: list[dict]) 
         except (ValueError, ValidationError) as exc:
             rejected.append({"strategy_name": name, "reason": str(exc)})
     raise ValueError(f"no executable strategy; rejected={rejected}")
-

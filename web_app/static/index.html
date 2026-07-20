@@ -21,10 +21,12 @@
       <textarea id="queryInput" rows="3"
         placeholder="请输入虚拟筛选任务，例如：&#10;寻找针对突变型IDH1(R132H)的变构抑制剂&#10;筛选能够同时激活核受体NURR1并抑制单胺氧化酶MAO-B的双靶点分子，用于帕金森病"></textarea>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0">
-        <label>蛋白 PDB<input id="proteinInput" type="file" accept=".pdb" required></label>
+        <label>预处理后的蛋白 PDB（必需）<input id="proteinInput" type="file" accept=".pdb" required></label>
         <label>分子库<input id="libraryInput" type="file" accept=".smi,.smiles,.csv,.sdf" required></label>
-        <label>口袋中心（可选，x,y,z）<input id="centerInput" type="text" placeholder="-15.36,2.24,-9.56"></label>
+        <label>口袋中心（推荐填写，x,y,z）<input id="centerInput" type="text" placeholder="留空则依据靶点调研自动确定"></label>
+        <label>口袋尺寸（x,y,z）<input id="sizeInput" type="text" value="24,24,24"></label>
         <label>关键残基（可选，逗号分隔）<input id="residueInput" type="text" placeholder="ASP103,TRP144,GLY145"></label>
+        <label>共晶配体选择器（可选）<input id="ligandInput" type="text" placeholder="例如 VEN:A:201"></label>
       </div>
       <div style="display:flex;gap:18px;margin-bottom:12px">
         <label><input id="cpuOnly" type="checkbox"> CPU-only</label>
@@ -47,23 +49,28 @@
           <span>靶点调研</span>
         </div>
         <div class="pconnector"><div class="pfill"></div></div>
-        <div class="pnode" data-step="策略生成">
+        <div class="pnode" data-step="口袋预检">
           <div class="pdot">2</div>
+          <span>口袋预检</span>
+        </div>
+        <div class="pconnector"><div class="pfill"></div></div>
+        <div class="pnode" data-step="策略生成">
+          <div class="pdot">3</div>
           <span>策略生成</span>
         </div>
         <div class="pconnector"><div class="pfill"></div></div>
         <div class="pnode" data-step="策略审评">
-          <div class="pdot">3</div>
+          <div class="pdot">4</div>
           <span>策略审评</span>
         </div>
         <div class="pconnector"><div class="pfill"></div></div>
         <div class="pnode" data-step="策略进化">
-          <div class="pdot">4</div>
+          <div class="pdot">5</div>
           <span>策略进化</span>
         </div>
         <div class="pconnector"><div class="pfill"></div></div>
         <div class="pnode" data-step="输出结果">
-          <div class="pdot">5</div>
+          <div class="pdot">6</div>
           <span>输出结果</span>
         </div>
       </div>

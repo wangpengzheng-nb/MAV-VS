@@ -14,8 +14,8 @@ from autovs.capabilities import health_report
 from autovs.compiler import choose_executable_strategy, compile_strategy
 from autovs.config import Settings, load_settings
 from autovs.db import StateStore
-from autovs.reporting import generate_report
-from autovs.schemas import ActionType, JobStatus, TaskRequest, WorkflowPlan, WorkflowStep
+from autovs.reporting import generate_failure_report, generate_report
+from autovs.schemas import ActionType, JobStatus, PocketResolution, TaskRequest, WorkflowPlan, WorkflowStep
 from autovs.security import sha256_file
 from autovs.tool_manager import ToolManager
 
@@ -80,21 +80,32 @@ class PipelineService:
         request = TaskRequest.model_validate(task["request"])
         rejected: list[dict] = []
         try:
+            self._run_step(
+                task_id, WorkflowStep(step_id="input-validation", action_type=ActionType.INPUT_VALIDATION),
+                {"protein_path": request.protein_path, "library_path": request.library_path},
+            )
             if use_llm_planning:
-                planning = self._run_planning(request, task_dir)
+                planning = self._run_planning(task_id, request, task_dir)
                 _, plan, rejected = choose_executable_strategy(planning["ranked_names"], planning["evolved_strategies"])
             else:
                 plan = build_cpu_baseline_plan()
-                planning = {"mode": "deterministic_cpu_baseline", "ranked_names": [plan.strategy_id]}
+                pocket_resolution = self._resolve_pocket_preflight(task_id, request, task_dir, {})
+                planning = {"mode": "deterministic_cpu_baseline", "ranked_names": [plan.strategy_id],
+                            "pocket_resolution": pocket_resolution.model_dump(mode="json")}
             (task_dir / "workflow_plan.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
             result = self._execute_core(task_id, request, plan, rejected, planning)
             self.store.update_task(task_id, JobStatus.SUCCEEDED, result=result)
         except Exception as exc:
-            failure = {"task_id": task_id, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            error = f"{type(exc).__name__}: {exc}"
+            reports = generate_failure_report(task_id, task_dir, request=request.model_dump(mode="json"), error=error)
+            for name, raw_path in reports.items():
+                path = Path(raw_path)
+                self.store.add_artifact(task_id, None, name, path, path.suffix.lstrip(".").upper(), sha256_file(path))
+            failure = {"task_id": task_id, "status": "failed", "error": error, "reports": reports}
             (task_dir / "failure.json").write_text(json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
             self.store.update_task(task_id, JobStatus.FAILED, result=failure, error=failure["error"])
 
-    def _run_planning(self, request: TaskRequest, task_dir: Path) -> dict:
+    def _run_planning(self, task_id: str, request: TaskRequest, task_dir: Path) -> dict:
         from src.agents.expert_committee import REVIEWER_CONFIGS, TournamentReviewer
         from src.agents.judge_agent import VoteAggregator
         from src.agents.strategy_evolver import StrategyEvolver
@@ -104,6 +115,10 @@ class PipelineService:
         research = TargetScoutAgent().deep_research(request.query)
         research["_user_query"] = request.query
         (task_dir / "research.json").write_text(json.dumps(research, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        pocket_resolution = self._resolve_pocket_preflight(task_id, request, task_dir, research)
+        # Strategy agents may interpret this verified result, but the executor never accepts
+        # coordinates copied back from an LLM-authored strategy.
+        research["resolved_pocket"] = pocket_resolution.model_dump(mode="json")
         strategies = StrategyGeneratorAgent().generate_strategies(research)["strategies"]
         (task_dir / "strategies.json").write_text(json.dumps(strategies, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -126,7 +141,29 @@ class PipelineService:
             diagnostic_map[name] = aggregator.prepare_evolution_input(strategy, name)["diagnosis"]
         evolved = StrategyEvolver().evolve_top_n(strategies, diagnostic_map, [], research, request.query, n=4)
         (task_dir / "evolved_strategies.json").write_text(json.dumps(evolved, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ranked_names": [item["strategy_name"] for item in ranking], "evolved_strategies": evolved}
+        return {"ranked_names": [item["strategy_name"] for item in ranking], "evolved_strategies": evolved,
+                "pocket_resolution": pocket_resolution.model_dump(mode="json")}
+
+    def _resolve_pocket_preflight(self, task_id: str, request: TaskRequest, task_dir: Path,
+                                  research: dict) -> PocketResolution:
+        step = WorkflowStep(step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION,
+                            requires=["input-validation"])
+        inputs = {
+            "protein_path": request.protein_path,
+            "center": request.pocket.center,
+            "size": request.pocket.size,
+            "key_residues": request.pocket.key_residues,
+            "cocrystal_ligand": request.pocket.cocrystal_ligand,
+        }
+        research_path = task_dir / "research.json"
+        if research:
+            if not research_path.exists():
+                research_path.write_text(json.dumps(research, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            inputs["research_path"] = str(research_path)
+        output = self._run_step(task_id, step, inputs)
+        resolution = PocketResolution.model_validate_json(Path(output["pocket"]).read_text(encoding="utf-8"))
+        (task_dir / "pocket_resolution.json").write_text(resolution.model_dump_json(indent=2), encoding="utf-8")
+        return resolution
 
     def _run_step(self, task_id: str, step: WorkflowStep, inputs: dict) -> dict:
         job = self.tools.submit(task_id, step, inputs, background=False)
@@ -148,10 +185,8 @@ class PipelineService:
 
         validation = self._run_step(task_id, by_action.get(ActionType.INPUT_VALIDATION, WorkflowStep(step_id="input-validation", action_type=ActionType.INPUT_VALIDATION)),
                                     {"protein_path": request.protein_path, "library_path": request.library_path})
-        pocket = self._run_step(task_id, by_action.get(ActionType.POCKET_DEFINITION, WorkflowStep(step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION)),
-                                {"protein_path": request.protein_path, "center": request.pocket.center,
-                                 "size": request.pocket.size, "key_residues": request.pocket.key_residues})
-        pocket_data = json.loads(Path(pocket["pocket"]).read_text())
+        pocket_resolution = PocketResolution.model_validate(planning["pocket_resolution"])
+        pocket_data = pocket_resolution.selected_pocket
         prep_step = by_action.get(ActionType.MOLECULE_STANDARDIZATION) or WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION)
         prepared = self._run_step(task_id, prep_step, {"library_path": request.library_path})
         protein = self._run_step(task_id, by_action.get(ActionType.PROTEIN_PREPARATION, WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION)),
@@ -162,7 +197,7 @@ class PipelineService:
             raise RuntimeError("selected strategy does not contain molecular_docking")
         docking = self._run_step(task_id, docking_step, {
             "receptor_pdbqt": protein["receptor_pdbqt"], "ligands_sdf": prepared["prepared_library"],
-            "manifest_csv": prepared["manifest"], "center": pocket_data["center"], "size": pocket_data["size"],
+            "manifest_csv": prepared["manifest"], "center": pocket_data.center, "size": pocket_data.size,
         })
         score_csv = Path(docking["scores_csv"])
         pose_step = by_action.get(ActionType.POSE_EXTRACTION)
@@ -187,12 +222,14 @@ class PipelineService:
         artifacts = self.store.list_artifacts(task_id)
         reports = generate_report(task_id, task_dir, request=request.model_dump(mode="json"), plan=plan.model_dump(mode="json"),
                                   results=top_hits, rejected_strategies=rejected, health=health_report(self.settings),
-                                  jobs=self.store.list_jobs(task_id), artifacts=artifacts)
+                                  jobs=self.store.list_jobs(task_id), artifacts=artifacts,
+                                  pocket_resolution=pocket_resolution.model_dump(mode="json"))
         for name, raw_path in reports.items():
             path = Path(raw_path); self.store.add_artifact(task_id, None, name, path, path.suffix.lstrip(".").upper(), sha256_file(path))
         return {"task_id": task_id, "status": "succeeded", "top_hits": top_hits, "reports": reports,
                 "workflow_plan": str(task_dir / "workflow_plan.json"), "evidence_gaps": evidence_gaps,
-                "rejected_strategies": rejected, "planning": planning}
+                "rejected_strategies": rejected, "planning": planning,
+                "pocket_resolution": pocket_resolution.model_dump(mode="json")}
 
 
 def build_cpu_baseline_plan() -> WorkflowPlan:

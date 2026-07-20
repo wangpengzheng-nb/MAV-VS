@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from autovs.schemas import ActionType, WorkflowPlan, WorkflowStep
+from autovs.schemas import ActionType, PocketSpec, WorkflowPlan, WorkflowStep
 
 
 def test_workflow_rejects_unknown_fields():
@@ -21,3 +21,7 @@ def test_workflow_accepts_ordered_dag():
     ])
     assert plan.plan_version == "1.0"
 
+
+def test_pocket_box_size_has_scientific_bounds():
+    with pytest.raises(ValidationError, match="between 8 and 60"):
+        PocketSpec(size=(2.0, 24.0, 24.0))
