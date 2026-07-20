@@ -141,3 +141,5 @@ def test_tool_manager_accepts_task_research_artifact_and_rejects_inline_research
     }, background=False)
     assert rejected.status == JobStatus.FAILED
     assert "inline research is forbidden" in rejected.message
+    failure_artifacts = [item for item in store.list_artifacts(task_id) if item["job_id"] == rejected.job_id]
+    assert any(item["name"] == "failure_diagnostic" and item["format"] == "JSON" for item in failure_artifacts)

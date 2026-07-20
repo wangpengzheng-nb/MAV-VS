@@ -1,62 +1,404 @@
+const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
+
 let currentTaskId = null;
 let eventSource = null;
+let lastTask = null;
+let lastSnapshot = null;
+let selectedPhaseId = null;
 
-async function startPipeline() {
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('taskForm').addEventListener('submit', startPipeline);
+  document.getElementById('queryInput').addEventListener('input', updateQueryCount);
+  document.getElementById('proteinInput').addEventListener('change', event => updateFileName(event, 'proteinFileName'));
+  document.getElementById('libraryInput').addEventListener('change', event => updateFileName(event, 'libraryFileName'));
+  document.getElementById('refreshTasks').addEventListener('click', loadRecentTasks);
+  document.getElementById('copyTaskId').addEventListener('click', copyTaskId);
+  document.getElementById('resumeBtn').addEventListener('click', resumeCurrentTask);
+  document.querySelectorAll('.output-tab').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
+  updateQueryCount();
+  loadHealth();
+  loadRecentTasks();
+  const remembered = localStorage.getItem('autovs.activeTaskId');
+  if (remembered) openTask(remembered, {quiet: true});
+});
+
+async function loadHealth() {
+  const container = document.getElementById('systemState');
+  try {
+    const response = await fetch('/api/health');
+    if (!response.ok) throw new Error('health check failed');
+    const data = await response.json();
+    const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
+    const unavailable = capabilities.filter(item => item.availability === 'unavailable').length;
+    const degraded = capabilities.filter(item => item.availability === 'degraded').length;
+    const state = unavailable ? 'degraded' : (degraded ? 'degraded' : 'available');
+    container.className = `system-state ${state}`;
+    document.getElementById('healthText').textContent = unavailable || degraded
+      ? `环境可运行 · ${unavailable + degraded} 项降级`
+      : '计算环境可用';
+  } catch (_) {
+    container.className = 'system-state unavailable';
+    document.getElementById('healthText').textContent = '无法读取环境状态';
+  }
+}
+
+async function loadRecentTasks() {
+  const container = document.getElementById('recentTasks');
+  try {
+    const response = await fetch('/api/tasks?limit=12');
+    if (!response.ok) throw new Error('无法读取任务历史');
+    const tasks = (await response.json()).tasks || [];
+    if (!tasks.length) {
+      container.innerHTML = '<p class="muted-empty">还没有任务记录。</p>';
+      return;
+    }
+    container.innerHTML = tasks.map(task => `
+      <button class="recent-task status-${escapeHtml(task.status)} ${task.task_id === currentTaskId ? 'active' : ''}" type="button" data-task-id="${escapeHtml(task.task_id)}">
+        <i></i><span class="recent-copy"><strong>${escapeHtml(task.query || '未命名筛选任务')}</strong><small>${escapeHtml(task.task_id)}</small></span>
+        <time>${escapeHtml(shortTime(task.updated_at))}</time>
+      </button>`).join('');
+    container.querySelectorAll('.recent-task').forEach(button => button.addEventListener('click', () => openTask(button.dataset.taskId)));
+  } catch (error) {
+    container.innerHTML = `<p class="muted-empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function startPipeline(event) {
+  event.preventDefault();
   const query = document.getElementById('queryInput').value.trim();
   const protein = document.getElementById('proteinInput').files[0];
   const library = document.getElementById('libraryInput').files[0];
+  const errorBox = document.getElementById('formError');
+  errorBox.hidden = true;
   if (query.length < 10 || !protein || !library) {
-    alert('请填写至少10个字符的任务描述，并上传PDB蛋白和SMI/CSV/SDF分子库'); return;
+    showFormError('请填写至少 10 个字符的筛选目标，并上传蛋白 PDB 与分子库。');
+    return;
+  }
+  if (!protein.name.toLowerCase().endsWith('.pdb')) {
+    showFormError('蛋白文件必须是预处理后的 .pdb 文件。');
+    return;
   }
   const form = new FormData();
-  form.append('query', query); form.append('protein', protein); form.append('library', library);
+  form.append('query', query);
+  form.append('protein', protein);
+  form.append('library', library);
   form.append('center', document.getElementById('centerInput').value.trim());
   form.append('size', document.getElementById('sizeInput').value.trim());
   form.append('key_residues', document.getElementById('residueInput').value.trim());
   form.append('ligand_id', document.getElementById('ligandInput').value.trim());
   form.append('cpu_only', document.getElementById('cpuOnly').checked ? 'true' : 'false');
   form.append('baseline', document.getElementById('baselineMode').checked ? 'true' : 'false');
-  const button = document.getElementById('runBtn'); button.disabled = true; button.textContent = '提交中…';
-  document.getElementById('progressSection').style.display = 'block';
+  setSubmitState(true);
   try {
     const response = await fetch('/api/tasks', {method: 'POST', body: form});
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '提交失败');
-    currentTaskId = data.task_id; document.getElementById('taskId').textContent = currentTaskId;
-    connectProgress(currentTaskId);
-  } catch (error) { alert(error.message); resetUI(); }
+    if (!response.ok) throw new Error(data.detail || '任务提交失败');
+    showToast(`任务 ${data.task_id} 已进入队列`);
+    await openTask(data.task_id);
+    loadRecentTasks();
+  } catch (error) {
+    showFormError(error.message);
+  } finally {
+    setSubmitState(false);
+  }
+}
+
+async function openTask(taskId, {quiet = false} = {}) {
+  disconnectProgress();
+  selectedPhaseId = null;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+    if (!response.ok) throw new Error(response.status === 404 ? '任务记录不存在' : '无法读取任务状态');
+    const task = await response.json();
+    currentTaskId = task.task_id;
+    lastTask = task;
+    localStorage.setItem('autovs.activeTaskId', currentTaskId);
+    renderFullTask(task);
+    if (!TERMINAL.has(task.status)) connectProgress(task.task_id);
+    loadRecentTasks();
+  } catch (error) {
+    if (!quiet) showToast(error.message, 'error');
+    localStorage.removeItem('autovs.activeTaskId');
+  }
 }
 
 function connectProgress(taskId) {
-  if (eventSource) eventSource.close();
-  eventSource = new EventSource(`/api/progress/${taskId}`);
+  disconnectProgress();
+  const connection = document.getElementById('connectionState');
+  connection.textContent = '正在连接实时状态';
+  eventSource = new EventSource(`/api/progress/${encodeURIComponent(taskId)}`);
+  eventSource.onopen = () => { connection.textContent = '实时状态已连接'; };
   eventSource.onmessage = async event => {
-    const data = JSON.parse(event.data);
-    document.getElementById('pctText').textContent = `${data.percent || 0}%`;
-    document.getElementById('stepMsg').textContent = `${data.step || ''}: ${data.message || data.status}`;
-    if (data.status === 'done') { eventSource.close(); await fetchResult(taskId); }
-    if (data.status === 'error') { eventSource.close(); alert(data.message || '任务失败'); await fetchResult(taskId); }
+    const snapshot = JSON.parse(event.data);
+    renderSnapshot(snapshot);
+    if (TERMINAL.has(snapshot.status)) {
+      disconnectProgress();
+      await refreshCurrentTask();
+      loadRecentTasks();
+    }
+  };
+  eventSource.onerror = () => {
+    connection.textContent = '连接中断，正在自动重连';
   };
 }
 
-async function fetchResult(taskId) {
-  const response = await fetch(`/api/result/${taskId}`); const data = await response.json();
-  const container = document.getElementById('reportContent');
-  if (data.status !== 'done') {
-    const failureReport = data.result?.reports?.failure_report_html || '';
-    container.innerHTML = `<h2>任务预检失败</h2><p>${escapeHtml(data.error || '请查看任务状态和日志。')}</p>` +
-      (failureReport ? `<p>失败报告: ${escapeHtml(failureReport)}</p>` : '');
-  } else {
-    const result = data.result || {}; const hits = result.top_hits || []; const pocket = result.pocket_resolution?.selected_pocket || {};
-    container.innerHTML = `<h2>口袋预检</h2><p>ID: ${escapeHtml(pocket.pocket_id || '')} | 来源: ${escapeHtml(pocket.source || '')} | 置信度: ${escapeHtml(pocket.confidence || '')}</p>` +
-      `<p>中心: ${escapeHtml(JSON.stringify(pocket.center || []))} | 尺寸: ${escapeHtml(JSON.stringify(pocket.size || []))}</p>` +
-      `<h2>最终候选 (${hits.length})</h2><p>报告: ${escapeHtml(result.reports?.report_html || '')}</p>` +
-      `<table><thead><tr><th>Rank</th><th>Source ID</th><th>Affinity</th><th>Final score</th></tr></thead><tbody>` +
-      hits.map(hit => `<tr><td>${escapeHtml(hit.rank)}</td><td>${escapeHtml(hit.source_id)}</td><td>${escapeHtml(hit.docking_affinity)}</td><td>${escapeHtml(hit.final_score)}</td></tr>`).join('') + '</tbody></table>' +
-      `<h3>尚缺证据</h3><p>${escapeHtml((result.evidence_gaps || []).join(', ') || '无')}</p>`;
-  }
-  document.getElementById('resultSection').style.display = 'block'; resetUI();
+function disconnectProgress() {
+  if (eventSource) eventSource.close();
+  eventSource = null;
 }
 
-function resetUI() { const button = document.getElementById('runBtn'); button.disabled = false; button.innerHTML = '<span class="btn-icon">🚀</span> 开始虚拟筛选'; }
-function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function refreshCurrentTask() {
+  if (!currentTaskId) return;
+  const response = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}`);
+  if (!response.ok) return;
+  const task = await response.json();
+  lastTask = task;
+  renderFullTask(task);
+}
+
+function renderFullTask(task) {
+  lastTask = task;
+  document.getElementById('taskQuery').textContent = task.request?.query || task.query || '虚拟筛选任务';
+  renderSnapshot(snapshotFromTask(task));
+  renderOutputs(task);
+}
+
+function snapshotFromTask(task) {
+  const phases = task.progress || [];
+  const counted = phases.filter(phase => !(phase.status === 'skipped'
+    && (phase.message?.startsWith('基础链路') || phase.message?.startsWith('未包含'))));
+  const completed = counted.filter(phase => ['succeeded', 'failed', 'quarantined', 'cancelled'].includes(phase.status)).length;
+  const current = phases.find(phase => phase.status === 'running')
+    || [...phases].reverse().find(phase => phase.status === 'failed')
+    || [...phases].reverse().find(phase => phase.status === 'succeeded');
+  return {
+    task_id: task.task_id,
+    status: task.status,
+    percent: task.status === 'succeeded' ? 100 : Math.floor(100 * completed / Math.max(1, counted.length)),
+    current_phase: current,
+    phases,
+    jobs: task.jobs || [],
+    error: task.error || '',
+    updated_at: task.updated_at,
+  };
+}
+
+function renderSnapshot(snapshot) {
+  lastSnapshot = snapshot;
+  currentTaskId = snapshot.task_id;
+  document.getElementById('emptyState').hidden = true;
+  document.getElementById('taskWorkspace').hidden = false;
+  document.getElementById('taskId').textContent = snapshot.task_id;
+  const status = document.getElementById('taskStatus');
+  status.textContent = statusLabel(snapshot.status).toUpperCase();
+  status.className = `status-pill ${snapshot.status}`;
+  document.getElementById('resumeBtn').hidden = !['failed', 'cancelled'].includes(snapshot.status);
+  document.getElementById('percentText').textContent = `${snapshot.percent || 0}%`;
+  document.getElementById('meterFill').style.width = `${Math.max(0, Math.min(100, snapshot.percent || 0))}%`;
+  document.querySelector('.meter-track').classList.toggle('running', snapshot.status === 'running');
+  const current = snapshot.current_phase;
+  document.getElementById('currentPhaseLabel').textContent = current ? current.label : statusLabel(snapshot.status);
+  document.getElementById('currentPhaseMessage').textContent = current?.error || current?.message || snapshot.error || '等待下一个阶段。';
+  const live = document.getElementById('liveBadge');
+  live.classList.toggle('active', snapshot.status === 'running');
+  live.innerHTML = snapshot.status === 'running' ? '<i></i> LIVE' : `<i></i> ${escapeHtml(statusLabel(snapshot.status).toUpperCase())}`;
+  renderStages(snapshot.phases || []);
+  const failed = (snapshot.phases || []).find(phase => phase.status === 'failed');
+  if (failed && selectedPhaseId !== failed.phase_id) showPhase(failed);
+}
+
+function renderStages(phases) {
+  const container = document.getElementById('stageList');
+  if (!phases.length) {
+    container.innerHTML = '<p class="muted-empty">正在初始化执行时间线…</p>';
+    return;
+  }
+  container.innerHTML = phases.map((phase, index) => `
+    <button class="phase-row status-${escapeHtml(phase.status)} ${phase.phase_id === selectedPhaseId ? 'selected' : ''}" type="button" data-phase-id="${escapeHtml(phase.phase_id)}">
+      <i class="phase-icon">${phaseIcon(phase.status, index + 1)}</i>
+      <span class="phase-copy"><strong>${escapeHtml(phase.label)}</strong><small>${escapeHtml(phase.error || phase.message || statusLabel(phase.status))}</small></span>
+      <time class="phase-time">${escapeHtml(shortTime(phase.updated_at))}</time>
+    </button>`).join('');
+  container.querySelectorAll('.phase-row').forEach(button => button.addEventListener('click', () => {
+    const phase = phases.find(item => item.phase_id === button.dataset.phaseId);
+    if (phase) showPhase(phase);
+  }));
+}
+
+async function showPhase(phase) {
+  selectedPhaseId = phase.phase_id;
+  document.querySelectorAll('.phase-row').forEach(row => row.classList.toggle('selected', row.dataset.phaseId === selectedPhaseId));
+  const container = document.getElementById('diagnosticContent');
+  container.innerHTML = renderPhaseSummary(phase, true);
+  const jobId = phase.metadata?.job_id;
+  if (!jobId || !currentTaskId) return;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/jobs/${encodeURIComponent(jobId)}/diagnostics`);
+    if (!response.ok) throw new Error('无法读取该工具步骤的诊断数据');
+    const data = await response.json();
+    if (selectedPhaseId === phase.phase_id) container.innerHTML = renderDiagnostics(phase, data);
+  } catch (error) {
+    if (selectedPhaseId === phase.phase_id) container.innerHTML = renderPhaseSummary({...phase, error: phase.error || error.message});
+  }
+}
+
+function renderPhaseSummary(phase, loading = false) {
+  const taskArtifacts = (lastTask?.artifacts || []).filter(item => !item.job_id && /error|failure/i.test(item.name));
+  return `
+    <div class="diagnostic-head"><span class="diag-status ${escapeHtml(phase.status)}">${escapeHtml(statusLabel(phase.status))}</span><h4>${escapeHtml(phase.label)}</h4><p>${escapeHtml(phase.message || '该阶段尚未产生执行消息。')}</p></div>
+    ${phase.error ? `<div class="error-block">${escapeHtml(phase.error)}</div>` : ''}
+    <dl class="diag-meta"><dt>阶段 ID</dt><dd>${escapeHtml(phase.phase_id)}</dd><dt>更新时间</dt><dd>${escapeHtml(formatDate(phase.updated_at))}</dd>${phase.metadata?.step_id ? `<dt>工具步骤</dt><dd>${escapeHtml(phase.metadata.step_id)}</dd>` : ''}</dl>
+    ${taskArtifacts.length ? `<div class="diag-links">${taskArtifacts.map(artifactLink).join('')}</div>` : ''}
+    ${loading ? '<p class="muted-empty">正在读取工具日志…</p>' : ''}`;
+}
+
+function renderDiagnostics(phase, data) {
+  const job = data.job || {};
+  const snippets = data.snippets || [];
+  const artifacts = data.artifacts || [];
+  return `
+    <div class="diagnostic-head"><span class="diag-status ${escapeHtml(job.status || phase.status)}">${escapeHtml(statusLabel(job.status || phase.status))}</span><h4>${escapeHtml(phase.label)}</h4><p>${escapeHtml(phase.message || '')}</p></div>
+    ${(phase.error || job.status === 'failed') ? `<div class="error-block">${escapeHtml(phase.error || job.message || '工具执行失败')}</div>` : ''}
+    <dl class="diag-meta"><dt>Job ID</dt><dd>${escapeHtml(job.job_id || '')}</dd><dt>Step ID</dt><dd>${escapeHtml(job.step_id || '')}</dd><dt>Action</dt><dd>${escapeHtml(job.action_type || '')}</dd>${job.slurm_job_id ? `<dt>Slurm ID</dt><dd>${escapeHtml(job.slurm_job_id)}</dd>` : ''}<dt>更新时间</dt><dd>${escapeHtml(formatDate(job.updated_at))}</dd></dl>
+    ${snippets.length ? `<div class="log-group"><h5>日志与异常详情</h5>${snippets.map(item => `<details class="log-entry" ${/failure/i.test(item.name) ? 'open' : ''}><summary>${escapeHtml(item.name)}${item.truncated ? ' · 仅显示末尾' : ''}</summary><pre>${escapeHtml(item.content)}</pre></details>`).join('')}</div>` : ''}
+    ${artifacts.length ? `<div class="diag-links">${artifacts.map(artifactLink).join('')}</div>` : '<p class="muted-empty">该步骤没有登记日志产物。</p>'}`;
+}
+
+function renderOutputs(task) {
+  const result = task.result;
+  const artifacts = task.artifacts || [];
+  document.getElementById('artifactCount').textContent = artifacts.length;
+  document.getElementById('tabArtifacts').innerHTML = renderArtifacts(task.task_id, artifacts);
+  if (!result) {
+    document.getElementById('tabOverview').innerHTML = '<div class="output-placeholder">任务运行完成后，这里会显示候选化合物与可复现报告。</div>';
+    document.getElementById('tabPocket').innerHTML = '<div class="output-placeholder">等待口袋预检完成。</div>';
+    return;
+  }
+  if (task.status === 'failed') {
+    document.getElementById('tabOverview').innerHTML = `<div class="failure-result"><h4>任务在产生科学结果前终止</h4><p>${escapeHtml(task.error || result.error || '请在执行时间线中查看失败阶段。')}</p></div>`;
+    document.getElementById('tabPocket').innerHTML = '<div class="output-placeholder">口袋可能尚未通过质量门禁，请查看诊断面板和失败报告。</div>';
+    return;
+  }
+  const hits = result.top_hits || [];
+  const pocket = result.pocket_resolution?.selected_pocket;
+  const gaps = result.evidence_gaps || [];
+  document.getElementById('tabOverview').innerHTML = `
+    <div class="result-summary"><div class="metric-card"><span>最终候选</span><strong>${hits.length}</strong></div><div class="metric-card"><span>主口袋置信度</span><strong>${escapeHtml(pocket?.confidence || '—')}</strong></div><div class="metric-card"><span>待补证据</span><strong>${gaps.length}</strong></div></div>
+    ${hits.length ? `<table class="result-table"><thead><tr><th>Rank</th><th>Source ID</th><th>Affinity</th><th>PLIP</th><th>Final score</th></tr></thead><tbody>${hits.map(hit => `<tr><td>${escapeHtml(hit.rank || '')}</td><td>${escapeHtml(hit.source_id || '')}</td><td>${escapeHtml(hit.docking_affinity ?? '—')}</td><td>${escapeHtml(hit.plip_score ?? '—')}</td><td>${escapeHtml(hit.final_score ?? '—')}</td></tr>`).join('')}</tbody></table>` : '<div class="output-placeholder">没有可交付的候选化合物。</div>'}`;
+  document.getElementById('tabPocket').innerHTML = renderPocket(result.pocket_resolution);
+}
+
+function renderPocket(resolution) {
+  if (!resolution?.selected_pocket) return '<div class="output-placeholder">没有口袋解析结果。</div>';
+  const candidates = [resolution.selected_pocket, ...(resolution.alternate_pockets || [])];
+  return `<div class="pocket-grid">${candidates.map((pocket, index) => `
+    <article class="pocket-card ${index === 0 ? 'selected' : ''}"><span class="pocket-badge">${index === 0 ? 'SELECTED POCKET' : `ALTERNATE ${index}`}</span><h4>${escapeHtml(pocket.pocket_id)}</h4>
+      <dl class="pocket-data"><dt>来源</dt><dd>${escapeHtml(pocket.source)}</dd><dt>置信度</dt><dd>${escapeHtml(pocket.confidence)}</dd><dt>中心</dt><dd>${escapeHtml(formatVector(pocket.center))}</dd><dt>尺寸</dt><dd>${escapeHtml(formatVector(pocket.size))}</dd><dt>残基</dt><dd>${escapeHtml((pocket.residues || []).join(', ') || '—')}</dd></dl>
+      ${(pocket.quality_gates || []).length ? `<ul class="gate-list">${pocket.quality_gates.map(gate => `<li><b>${escapeHtml(gate.status)}</b> · ${escapeHtml(gate.name)} — ${escapeHtml(gate.detail)}</li>`).join('')}</ul>` : ''}
+      ${(pocket.evidence || []).length ? `<ul class="evidence-list">${pocket.evidence.map(item => `<li>${escapeHtml(item.description)}</li>`).join('')}</ul>` : ''}
+    </article>`).join('')}</div>`;
+}
+
+function renderArtifacts(taskId, artifacts) {
+  if (!artifacts.length) return '<div class="output-placeholder">任务产物将在执行过程中持续登记。</div>';
+  return `<div class="artifact-grid">${artifacts.map(item => `
+    <article class="artifact-card"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${escapeHtml(item.format)} · ${escapeHtml(formatBytes(item.size_bytes))}</small><a href="/api/tasks/${encodeURIComponent(taskId)}/artifacts/${item.artifact_id}">下载并检查</a></article>`).join('')}</div>`;
+}
+
+async function resumeCurrentTask() {
+  if (!currentTaskId) return;
+  const button = document.getElementById('resumeBtn');
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/resume`, {method: 'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '无法继续任务');
+    showToast('任务已重新进入执行状态');
+    await openTask(currentTaskId);
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.output-tab').forEach(button => {
+    const active = button.dataset.tab === name;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.querySelectorAll('.output-view').forEach(view => view.classList.remove('active'));
+  const target = document.getElementById(`tab${name.charAt(0).toUpperCase()}${name.slice(1)}`);
+  if (target) target.classList.add('active');
+}
+
+async function copyTaskId() {
+  if (!currentTaskId) return;
+  try {
+    await navigator.clipboard.writeText(currentTaskId);
+    showToast('Task ID 已复制');
+  } catch (_) {
+    showToast(`Task ID：${currentTaskId}`);
+  }
+}
+
+function updateQueryCount() {
+  document.getElementById('queryCount').textContent = `${document.getElementById('queryInput').value.length} / 5000`;
+}
+function updateFileName(event, targetId) {
+  const file = event.target.files[0];
+  document.getElementById(targetId).textContent = file ? `${file.name} · ${formatBytes(file.size)}` : '尚未选择文件';
+}
+function setSubmitState(running) {
+  const button = document.getElementById('runBtn');
+  button.disabled = running;
+  button.querySelector('span').textContent = running ? '正在创建任务…' : '启动新筛选';
+}
+function showFormError(message) {
+  const box = document.getElementById('formError');
+  box.textContent = message;
+  box.hidden = false;
+}
+function showToast(message, type = 'info') {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.style.background = type === 'error' ? '#8f3035' : '#10242d';
+  toast.hidden = false;
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => { toast.hidden = true; }, 3200);
+}
+function artifactLink(item) {
+  const url = item.download_url || `/api/tasks/${encodeURIComponent(currentTaskId)}/artifacts/${item.artifact_id}`;
+  return `<a class="artifact-link" href="${url}">${escapeHtml(item.name)} ↓</a>`;
+}
+function phaseIcon(status, index) {
+  if (status === 'succeeded') return '✓';
+  if (status === 'failed') return '!';
+  if (status === 'running') return '••';
+  if (status === 'skipped') return '–';
+  return String(index).padStart(2, '0');
+}
+function statusLabel(status) {
+  return ({pending: '等待', running: '运行中', succeeded: '已完成', failed: '失败', skipped: '已跳过', quarantined: '已隔离', cancelled: '已取消'})[status] || status || '未知';
+}
+function formatVector(values) { return Array.isArray(values) ? values.map(value => Number(value).toFixed(2)).join(', ') : '—'; }
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+function shortTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
+}
+function formatDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', {hour12: false});
+}
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[character]));
+}

@@ -1,112 +1,148 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoVS-Agent — 虚拟筛选智能体</title>
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>AutoVS · Screening Console</title>
+  <link rel="stylesheet" href="/static/style.css?v=__STYLE_VERSION__">
 </head>
 <body>
-<div class="container">
-
-  <!-- 头部 -->
-  <header>
-    <h1>🧬 AutoVS-Agent</h1>
-    <p class="subtitle">AI 驱动的自动化虚拟筛选智能体系统</p>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="AutoVS 首页">
+      <span class="brand-mark" aria-hidden="true">
+        <i></i><i></i><i></i><i></i>
+      </span>
+      <span>
+        <strong>AutoVS</strong>
+        <small>Screening Console</small>
+      </span>
+    </a>
+    <div class="system-state" id="systemState" role="status" aria-live="polite">
+      <span class="state-light"></span>
+      <span id="healthText">正在检查计算环境</span>
+    </div>
   </header>
 
-  <!-- 输入区 -->
-  <section class="input-section" id="inputSection">
-    <div class="input-wrapper">
-      <textarea id="queryInput" rows="3"
-        placeholder="请输入虚拟筛选任务，例如：&#10;寻找针对突变型IDH1(R132H)的变构抑制剂&#10;筛选能够同时激活核受体NURR1并抑制单胺氧化酶MAO-B的双靶点分子，用于帕金森病"></textarea>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0">
-        <label>预处理后的蛋白 PDB（必需）<input id="proteinInput" type="file" accept=".pdb" required></label>
-        <label>分子库<input id="libraryInput" type="file" accept=".smi,.smiles,.csv,.sdf" required></label>
-        <label>口袋中心（推荐填写，x,y,z）<input id="centerInput" type="text" placeholder="留空则依据靶点调研自动确定"></label>
-        <label>口袋尺寸（x,y,z）<input id="sizeInput" type="text" value="24,24,24"></label>
-        <label>关键残基（可选，逗号分隔）<input id="residueInput" type="text" placeholder="ASP103,TRP144,GLY145"></label>
-        <label>共晶配体选择器（可选）<input id="ligandInput" type="text" placeholder="例如 VEN:A:201"></label>
-      </div>
-      <div style="display:flex;gap:18px;margin-bottom:12px">
-        <label><input id="cpuOnly" type="checkbox"> CPU-only</label>
-        <label><input id="baselineMode" type="checkbox"> 基础链路诊断（跳过LLM规划）</label>
-      </div>
-      <button id="runBtn" onclick="startPipeline()">
-        <span class="btn-icon">🚀</span> 开始虚拟筛选
-      </button>
-    </div>
-  </section>
-
-  <!-- 进度条 -->
-  <section class="progress-section" id="progressSection" style="display:none">
-    <h3>运行进度</h3>
-    <p>Task ID: <code id="taskId"></code></p>
-    <div class="progress-track">
-      <div class="progress-nodes" id="progressNodes">
-        <div class="pnode" data-step="靶点调研">
-          <div class="pdot">1</div>
-          <span>靶点调研</span>
+  <div class="app-shell">
+    <aside class="control-column" aria-label="任务控制台">
+      <form id="taskForm" class="control-card" novalidate>
+        <div class="section-heading">
+          <span class="section-kicker">NEW RUN</span>
+          <h1>定义筛选任务</h1>
+          <p>上传预处理蛋白和分子库，系统将固化每一步计算证据。</p>
         </div>
-        <div class="pconnector"><div class="pfill"></div></div>
-        <div class="pnode" data-step="口袋预检">
-          <div class="pdot">2</div>
-          <span>口袋预检</span>
+
+        <label class="field field-query" for="queryInput">
+          <span class="field-label">筛选目标 <b>必需</b></span>
+          <textarea id="queryInput" rows="5" maxlength="5000" placeholder="例如：寻找针对 BCL2 的非共价小分子抑制剂，优先保留与 ASP103 和 TRP144 的关键作用。" required></textarea>
+          <span class="field-meta"><span>说清靶点、机制和筛选偏好</span><span id="queryCount">0 / 5000</span></span>
+        </label>
+
+        <div class="upload-grid">
+          <label class="upload-field" for="proteinInput">
+            <input id="proteinInput" type="file" accept=".pdb" required>
+            <span class="upload-type">PDB</span>
+            <span class="upload-copy"><strong>预处理蛋白</strong><small id="proteinFileName">选择 .pdb 文件</small></span>
+            <span class="upload-action">选择</span>
+          </label>
+          <label class="upload-field" for="libraryInput">
+            <input id="libraryInput" type="file" accept=".smi,.smiles,.csv,.sdf" required>
+            <span class="upload-type">LIB</span>
+            <span class="upload-copy"><strong>小分子库</strong><small id="libraryFileName">SMI / CSV / SDF</small></span>
+            <span class="upload-action">选择</span>
+          </label>
         </div>
-        <div class="pconnector"><div class="pfill"></div></div>
-        <div class="pnode" data-step="策略生成">
-          <div class="pdot">3</div>
-          <span>策略生成</span>
+
+        <details class="pocket-settings">
+          <summary>
+            <span><strong>口袋与运行参数</strong><small>坐标可留空，将使用调研证据解析</small></span>
+            <span class="summary-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="settings-body">
+            <div class="field-row">
+              <label class="field" for="centerInput"><span class="field-label">口袋中心</span><input id="centerInput" type="text" inputmode="decimal" placeholder="x, y, z"></label>
+              <label class="field" for="sizeInput"><span class="field-label">Box 尺寸</span><input id="sizeInput" type="text" inputmode="decimal" value="24,24,24"></label>
+            </div>
+            <label class="field" for="residueInput"><span class="field-label">关键残基</span><input id="residueInput" type="text" placeholder="ASP103, TRP144, GLY145"></label>
+            <label class="field" for="ligandInput"><span class="field-label">共晶配体选择器</span><input id="ligandInput" type="text" placeholder="例如 VEN:A:201"></label>
+            <div class="switch-list">
+              <label class="switch-row" for="cpuOnly"><span><strong>仅使用 CPU</strong><small>GPU 不可用时启用</small></span><input id="cpuOnly" type="checkbox"><i></i></label>
+              <label class="switch-row" for="baselineMode"><span><strong>基础链路诊断</strong><small>跳过 LLM 规划，用于工具联调</small></span><input id="baselineMode" type="checkbox"><i></i></label>
+            </div>
+          </div>
+        </details>
+
+        <div class="form-error" id="formError" role="alert" hidden></div>
+        <button class="run-button" id="runBtn" type="submit">
+          <span>启动新筛选</span>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5"/></svg>
+        </button>
+      </form>
+
+      <section class="recent-card" aria-labelledby="recentTitle">
+        <div class="recent-heading"><h2 id="recentTitle">最近任务</h2><button id="refreshTasks" type="button" aria-label="刷新任务列表">刷新</button></div>
+        <div id="recentTasks" class="recent-list"><p class="muted-empty">正在读取任务记录…</p></div>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <section class="empty-state" id="emptyState">
+        <div class="structure-field" aria-hidden="true">
+          <span class="orb orb-a"></span><span class="orb orb-b"></span><span class="orb orb-c"></span>
+          <span class="bond bond-a"></span><span class="bond bond-b"></span>
         </div>
-        <div class="pconnector"><div class="pfill"></div></div>
-        <div class="pnode" data-step="策略审评">
-          <div class="pdot">4</div>
-          <span>策略审评</span>
+        <span class="section-kicker">READY</span>
+        <h2>从可追溯计算链开始</h2>
+        <p>提交任务后，这里会实时显示调研、口袋确定、策略进化和工具执行状态。任何失败都会定位到具体阶段和日志。</p>
+        <div class="empty-legend"><span><i class="dot success"></i>成功固化</span><span><i class="dot running"></i>正在计算</span><span><i class="dot failed"></i>可诊断失败</span></div>
+      </section>
+
+      <section class="task-workspace" id="taskWorkspace" hidden>
+        <div class="task-header">
+          <div>
+            <div class="task-eyebrow"><span class="status-pill" id="taskStatus">PENDING</span><span id="connectionState">已连接</span></div>
+            <h2 id="taskQuery">虚拟筛选任务</h2>
+            <div class="task-id-line"><code id="taskId"></code><button id="copyTaskId" type="button">复制 ID</button></div>
+          </div>
+          <div class="task-actions"><button class="secondary-button" id="resumeBtn" type="button" hidden>继续运行</button></div>
         </div>
-        <div class="pconnector"><div class="pfill"></div></div>
-        <div class="pnode" data-step="策略进化">
-          <div class="pdot">5</div>
-          <span>策略进化</span>
+
+        <div class="run-meter" aria-label="总体运行进度">
+          <div class="meter-copy"><span id="currentPhaseLabel">正在准备任务</span><strong id="percentText">0%</strong></div>
+          <div class="meter-track"><span id="meterFill"></span><i id="meterPulse"></i></div>
+          <p id="currentPhaseMessage">等待第一个计算阶段开始。</p>
         </div>
-        <div class="pconnector"><div class="pfill"></div></div>
-        <div class="pnode" data-step="输出结果">
-          <div class="pdot">6</div>
-          <span>输出结果</span>
+
+        <div class="monitor-grid">
+          <section class="stage-panel">
+            <div class="panel-heading"><div><span class="section-kicker">PIPELINE</span><h3>执行时间线</h3></div><span class="live-badge" id="liveBadge"><i></i> LIVE</span></div>
+            <div class="stage-list" id="stageList"></div>
+          </section>
+
+          <section class="diagnostic-panel" aria-live="polite">
+            <div class="panel-heading"><div><span class="section-kicker">DIAGNOSTICS</span><h3>诊断面板</h3></div></div>
+            <div id="diagnosticContent" class="diagnostic-content">
+              <div class="diagnostic-empty"><span>i</span><p>选择一个阶段查看执行消息、工具任务和日志。</p></div>
+            </div>
+          </section>
         </div>
-      </div>
-    </div>
-    <div class="progress-status" id="progressStatus">
-      <span class="pct" id="pctText">0%</span>
-      <span class="msg" id="stepMsg">准备中...</span>
-    </div>
-  </section>
 
-  <!-- 结果区 -->
-  <section class="result-section" id="resultSection" style="display:none">
-    <div class="result-tabs">
-      <button class="tab active" onclick="switchTab('report')">📋 调研报告</button>
-      <button class="tab" onclick="switchTab('strategies')">🧬 进化策略</button>
-      <button class="tab" onclick="switchTab('ranking')">🏆 策略排名</button>
-    </div>
+        <section class="output-panel" id="outputPanel">
+          <div class="output-tabs" role="tablist" aria-label="任务输出">
+            <button class="output-tab active" role="tab" data-tab="overview" aria-selected="true">候选结果</button>
+            <button class="output-tab" role="tab" data-tab="pocket" aria-selected="false">口袋证据</button>
+            <button class="output-tab" role="tab" data-tab="artifacts" aria-selected="false">产物与日志 <span id="artifactCount">0</span></button>
+          </div>
+          <div id="tabOverview" class="output-view active" role="tabpanel"></div>
+          <div id="tabPocket" class="output-view" role="tabpanel"></div>
+          <div id="tabArtifacts" class="output-view" role="tabpanel"></div>
+        </section>
+      </section>
+    </main>
+  </div>
 
-    <!-- 调研报告 -->
-    <div class="tab-content active" id="tab-report">
-      <div class="report-view" id="reportContent"></div>
-    </div>
-
-    <!-- 进化策略 -->
-    <div class="tab-content" id="tab-strategies">
-      <div class="strategies-list" id="strategiesList"></div>
-    </div>
-
-    <!-- 排名 -->
-    <div class="tab-content" id="tab-ranking">
-      <div class="ranking-view" id="rankingContent"></div>
-    </div>
-  </section>
-
-</div>
-
-<script src="/static/app.js"></script>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/static/app.js?v=__APP_VERSION__"></script>
 </body>
 </html>

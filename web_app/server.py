@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from autovs.pipeline import PipelineService
@@ -21,15 +22,42 @@ app = FastAPI(title="AutoVS-Agent", version="0.1.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def cache_policy(request: Request, call_next):
+    """Prevent mixed frontend versions while retaining safe immutable asset caching."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    elif path.startswith("/static/"):
+        if request.query_params.get("v"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+    return response
+
+
+def _asset_digest(filename: str) -> str:
+    return hashlib.sha256((STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__STYLE_VERSION__", _asset_digest("style.css"))
+    html = html.replace("__APP_VERSION__", _asset_digest("app.js"))
+    return HTMLResponse(html)
 
 
 @app.get("/api/health")
 def health():
     from autovs.capabilities import health_report
     return health_report(service.settings)
+
+
+@app.get("/api/tasks")
+def list_tasks(limit: int = 20):
+    return {"tasks": service.store.list_tasks(limit)}
 
 
 @app.post("/api/tasks")
@@ -74,6 +102,31 @@ def get_task(task_id: str):
     return task
 
 
+@app.get("/api/tasks/{task_id}/jobs/{job_id}/diagnostics")
+def job_diagnostics(task_id: str, job_id: str):
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    job = next((item for item in task.get("jobs", []) if item["job_id"] == job_id), None)
+    if not job:
+        raise HTTPException(404, "工具任务不存在")
+    artifacts = []
+    snippets = []
+    for artifact in task.get("artifacts", []):
+        if artifact.get("job_id") != job_id:
+            continue
+        item = dict(artifact)
+        item["download_url"] = f"/api/tasks/{task_id}/artifacts/{artifact['artifact_id']}"
+        item.pop("path", None)
+        artifacts.append(item)
+        if artifact.get("format", "").upper() not in {"LOG", "TXT", "JSON"} or len(snippets) >= 4:
+            continue
+        path = ensure_within(artifact["path"], [service.settings.task_root], must_exist=True)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        snippets.append({"name": artifact["name"], "content": text[-40_000:], "truncated": len(text) > 40_000})
+    return {"job": job, "artifacts": artifacts, "snippets": snippets}
+
+
 @app.post("/api/tasks/{task_id}/resume")
 def resume_task(task_id: str):
     try:
@@ -90,13 +143,8 @@ async def progress(task_id: str):
             task = service.get_task(task_id)
             if not task:
                 yield f"data: {json.dumps({'status':'error','message':'任务不存在'}, ensure_ascii=False)}\n\n"; return
-            jobs = task.get("jobs", [])
-            completed = sum(job["status"] in {"succeeded", "failed", "skipped", "quarantined", "cancelled"} for job in jobs)
-            percent = min(99, int(100 * completed / max(1, len(jobs) + (0 if task["status"] in {"succeeded", "failed"} else 1))))
-            terminal = task["status"] in {"succeeded", "failed"}
-            payload = {"task_id": task_id, "status": "done" if task["status"] == "succeeded" else ("error" if task["status"] == "failed" else "running"),
-                       "percent": 100 if terminal else percent, "step": jobs[-1]["step_id"] if jobs else "planning",
-                       "message": task.get("error") or task["status"]}
+            payload = _progress_payload(task)
+            terminal = task["status"] in {"succeeded", "failed", "cancelled"}
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             if terminal:
                 return
@@ -119,6 +167,33 @@ def download_artifact(task_id: str, artifact_id: int):
         raise HTTPException(404, "产物不存在")
     path = ensure_within(artifact["path"], [service.settings.task_root], must_exist=True)
     return FileResponse(path, filename=path.name)
+
+
+def _progress_payload(task: dict) -> dict:
+    phases = task.get("progress", [])
+    counted = [phase for phase in phases if not (
+        phase["status"] == "skipped"
+        and (phase.get("message", "").startswith("基础链路") or phase.get("message", "").startswith("未包含"))
+    )]
+    completed = sum(phase["status"] in {"succeeded", "failed", "quarantined", "cancelled"} for phase in counted)
+    percent = int(100 * completed / max(1, len(counted)))
+    if task["status"] == "succeeded":
+        percent = 100
+    current = next((phase for phase in phases if phase["status"] == "running"), None)
+    if current is None:
+        current = next((phase for phase in reversed(phases) if phase["status"] == "failed"), None)
+    if current is None:
+        current = next((phase for phase in reversed(phases) if phase["status"] == "succeeded"), None)
+    return {
+        "task_id": task["task_id"],
+        "status": task["status"],
+        "percent": percent,
+        "current_phase": current,
+        "phases": phases,
+        "jobs": task.get("jobs", []),
+        "error": task.get("error", ""),
+        "updated_at": task.get("updated_at"),
+    }
 
 
 if __name__ == "__main__":

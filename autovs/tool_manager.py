@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import threading
+import traceback
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,25 @@ class ToolManager:
                     self.store.add_artifact(task["task_id"], job_id, name, value, value.suffix.lstrip(".").upper(), sha256_file(value))
             self.store.update_job(job_id, JobStatus.SUCCEEDED, message=json.dumps(_jsonable(outputs), ensure_ascii=False))
         except Exception as exc:
+            failure_path = work_dir / "failure.json"
+            failure_path.write_text(json.dumps({
+                "job_id": job_id,
+                "task_id": task["task_id"],
+                "step_id": step.step_id,
+                "action_type": step.action_type.value,
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.store.add_artifact(task["task_id"], job_id, "failure_diagnostic", failure_path,
+                                    "JSON", sha256_file(failure_path))
+            for diagnostic in sorted(work_dir.rglob("*")):
+                if (not diagnostic.is_file() or diagnostic == failure_path
+                        or diagnostic.suffix.lower() not in {".log", ".txt", ".json"}):
+                    continue
+                relative_name = diagnostic.relative_to(work_dir).as_posix().replace("/", "__")
+                self.store.add_artifact(task["task_id"], job_id, f"diagnostic__{relative_name}",
+                                        diagnostic, diagnostic.suffix.lstrip(".").upper(), sha256_file(diagnostic))
             self.store.update_job(job_id, JobStatus.FAILED, message=f"{type(exc).__name__}: {exc}")
 
     def _dispatch(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:

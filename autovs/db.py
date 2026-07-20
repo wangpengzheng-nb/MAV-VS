@@ -60,6 +60,15 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id);
                 CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
+                CREATE TABLE IF NOT EXISTS progress_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+                    phase_id TEXT NOT NULL, label TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    status TEXT NOT NULL, message TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+                    UNIQUE(task_id, phase_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_progress_task ON progress_events(task_id, sequence);
                 """
             )
 
@@ -139,3 +148,71 @@ class StateStore:
     def list_artifacts(self, task_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM artifacts WHERE task_id=? ORDER BY artifact_id", (task_id,))]
+
+    def initialize_progress(self, task_id: str, phases: list[tuple[str, str]]) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO progress_events(
+                    task_id, phase_id, label, sequence, status, message, error,
+                    metadata_json, created_at, updated_at
+                ) VALUES(?,?,?,?,?,'','','{}',?,?)
+                """,
+                [(task_id, phase_id, label, sequence, JobStatus.PENDING.value, now, now)
+                 for sequence, (phase_id, label) in enumerate(phases, 1)],
+            )
+
+    def update_progress(self, task_id: str, phase_id: str, status: JobStatus, *,
+                        message: str = "", error: str = "", metadata: dict[str, Any] | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE progress_events SET status=?, message=?, error=?,
+                    metadata_json=CASE WHEN ? IS NULL THEN metadata_json ELSE ? END,
+                    updated_at=? WHERE task_id=? AND phase_id=?
+                """,
+                (status.value, message, error, None if metadata is None else 1,
+                 json.dumps(metadata or {}, ensure_ascii=False), utcnow(), task_id, phase_id),
+            )
+
+    def list_progress(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM progress_events WHERE task_id=? ORDER BY sequence", (task_id,)
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            result.append(item)
+        return result
+
+    def finish_pending_progress(self, task_id: str, *, message: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE progress_events SET status=?, message=?, updated_at=? WHERE task_id=? AND status=?",
+                (JobStatus.SKIPPED.value, message, utcnow(), task_id, JobStatus.PENDING.value),
+            )
+
+    def fail_running_progress(self, task_id: str, *, error: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE progress_events SET status=?, error=?, message=?, updated_at=? WHERE task_id=? AND status=?",
+                (JobStatus.FAILED.value, error, "该阶段执行失败", utcnow(), task_id, JobStatus.RUNNING.value),
+            )
+
+    def list_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT task_id, status, error, created_at, updated_at, request_json FROM tasks "
+                "ORDER BY created_at DESC LIMIT ?", (safe_limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            request = json.loads(item.pop("request_json"))
+            item["query"] = request.get("query", "")
+            result.append(item)
+        return result
