@@ -12,11 +12,13 @@ from typing import Any
 from autovs.capabilities import list_capabilities
 from autovs.config import Settings
 from autovs.db import StateStore
+from autovs.library import normalize_smi_library, verify_default_library
 from autovs.pocket import resolve_pocket
 from autovs.preparation import prepare_library
 from autovs.ranking import rank_csv
-from autovs.schemas import ActionType, JobRecord, JobStatus, WorkflowStep
+from autovs.schemas import ActionType, InputManifest, JobRecord, JobStatus, WorkflowStep
 from autovs.security import ensure_within, run_argv, sha256_file
+from autovs.structure_acquisition import acquire_rcsb_structures
 
 
 class ToolManager:
@@ -58,7 +60,7 @@ class ToolManager:
             outputs = json.loads(message)
         except json.JSONDecodeError:
             return False
-        paths = [Path(value) for value in outputs.values() if isinstance(value, str) and ("/" in value or "\\" in value)]
+        paths = [Path(value) for value in _walk_output_strings(outputs) if "/" in value or "\\" in value]
         return bool(paths) and all(path.exists() for path in paths)
 
     def _execute(self, job_id: str, task: dict, step: WorkflowStep, inputs: dict[str, Any]) -> None:
@@ -70,6 +72,10 @@ class ToolManager:
             outputs = self._dispatch(step, inputs, work_dir)
             for name, value in outputs.items():
                 if isinstance(value, Path) and value.is_file():
+                    try:
+                        value.resolve().relative_to(task_dir.resolve())
+                    except ValueError:
+                        continue  # shared read-only assets are referenced by checksum, not exposed as task artifacts
                     self.store.add_artifact(task["task_id"], job_id, name, value, value.suffix.lstrip(".").upper(), sha256_file(value))
             self.store.update_job(job_id, JobStatus.SUCCEEDED, message=json.dumps(_jsonable(outputs), ensure_ascii=False))
         except Exception as exc:
@@ -97,18 +103,66 @@ class ToolManager:
     def _dispatch(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
         action = step.action_type
         if action == ActionType.INPUT_VALIDATION:
-            protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+            unexpected = set(inputs) - {"protein_path", "library_path", "input_manifest_path"}
+            if unexpected:
+                raise ValueError(f"input_validation received unsupported inputs: {sorted(unexpected)}")
             library = ensure_within(inputs["library_path"], self.allowed_roots, must_exist=True)
-            if protein.suffix.lower() != ".pdb":
-                raise ValueError("protein must be a preprocessed PDB file")
-            if not any(line.startswith("ATOM  ") for line in protein.read_text(errors="ignore").splitlines()):
-                raise ValueError("protein PDB contains no ATOM records")
-            if library.suffix.lower() not in {".smi", ".smiles", ".txt", ".csv", ".sdf"}:
-                raise ValueError("library must be SMI, CSV, or SDF")
+            manifest_path = ensure_within(inputs["input_manifest_path"], self.allowed_roots, must_exist=True)
+            manifest = InputManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+            protein = None
+            if inputs.get("protein_path"):
+                protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+                if protein.suffix.lower() != ".pdb":
+                    raise ValueError("protein must be a preprocessed PDB file")
+                if not any(line.startswith("ATOM  ") for line in protein.read_text(errors="ignore").splitlines()):
+                    raise ValueError("protein PDB contains no ATOM records")
+            max_molecules = int(self.settings.limit("max_library_molecules", 1_000_000))
+            if manifest.library_asset.source == "builtin":
+                cfg = self.settings.library()
+                check = verify_default_library(
+                    library, str(cfg.get("sha256", "")), int(cfg.get("molecule_count", 0)),
+                )
+                if check["status"] != "available":
+                    raise ValueError(str(check.get("reason", "default library is unavailable")))
+                validation = work_dir / "library_validation.json"
+                rejected = work_dir / "library_rejected.tsv"
+                payload = {
+                    "format": "strict_smi_v1", "source": "builtin", "version": cfg.get("version"),
+                    "input_path": str(library), "input_sha256": sha256_file(library),
+                    "normalized_path": str(library), "normalized_sha256": sha256_file(library),
+                    "total_records": int(cfg["molecule_count"]), "accepted_records": int(cfg["molecule_count"]),
+                    "quarantined_records": 0, "rejection_reasons": {},
+                }
+                validation.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                rejected.write_text("line_number\tmolecule_id\tsmiles\treason\n", encoding="utf-8")
+                normalized: dict[str, Any] = {**payload, "normalized_library": library,
+                                              "validation": validation, "rejected": rejected}
+            else:
+                normalized = normalize_smi_library(library, work_dir, max_molecules=max_molecules, source="user")
             output = work_dir / "input_validation.json"
-            output.write_text(json.dumps({"protein": str(protein), "library": str(library),
-                                          "protein_sha256": sha256_file(protein), "library_sha256": sha256_file(library)}, indent=2), encoding="utf-8")
-            return {"validation": output}
+            output.write_text(json.dumps({
+                "protein": str(protein) if protein else None,
+                "protein_sha256": sha256_file(protein) if protein else None,
+                "library": str(library), "library_sha256": sha256_file(library),
+                "normalized_library": str(normalized["normalized_library"]),
+                "normalized_library_sha256": normalized["normalized_sha256"],
+                "total_records": normalized["total_records"],
+                "accepted_records": normalized["accepted_records"],
+                "quarantined_records": normalized["quarantined_records"],
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            return {"input_validation": output, "normalized_library": normalized["normalized_library"],
+                    "library_validation": normalized["validation"], "library_rejected": normalized["rejected"],
+                    "total_records": normalized["total_records"], "accepted_records": normalized["accepted_records"],
+                    "quarantined_records": normalized["quarantined_records"]}
+        if action == ActionType.TARGET_STRUCTURE_ACQUISITION:
+            unexpected = set(inputs) - {"research_path", "limit", "selected_strategy_id"}
+            if unexpected:
+                raise ValueError(f"target_structure_acquisition received unsupported inputs: {sorted(unexpected)}")
+            research_path = ensure_within(inputs["research_path"], [work_dir.parent.parent], must_exist=True)
+            return acquire_rcsb_structures(
+                research_path, work_dir, limit=min(int(inputs.get("limit", 5)), 5),
+                selected_strategy_id=str(inputs.get("selected_strategy_id", "")),
+            )
         if action == ActionType.POCKET_DEFINITION:
             protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
             if "research" in inputs:
@@ -307,6 +361,17 @@ class ToolManager:
 
 def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:
     return {key: str(value) if isinstance(value, Path) else value for key, value in outputs.items()}
+
+
+def _walk_output_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_output_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_output_strings(item)
 
 
 def _normalize_residue(value: str) -> str:

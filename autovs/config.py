@@ -50,6 +50,16 @@ class Settings:
     def limit(self, name: str, default: Any = None) -> Any:
         return self.raw.get("limits", {}).get(name, default)
 
+    def library(self, name: str = "default") -> dict[str, Any]:
+        return dict(self.raw.get("libraries", {}).get(name, {}))
+
+    @property
+    def default_library_path(self) -> Path:
+        value = os.getenv("AUTOVS_DEFAULT_LIBRARY", self.library().get("path", ""))
+        if not value:
+            raise ValueError("default molecular library is not configured")
+        return _resolve_project_path(value)
+
 
 def load_settings(path: str | Path | None = None) -> Settings:
     config_path = Path(path or os.getenv("AUTOVS_CONFIG", PROJECT_ROOT / "config/tools.toml")).resolve()
@@ -59,4 +69,3 @@ def load_settings(path: str | Path | None = None) -> Settings:
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     settings.task_root.mkdir(parents=True, exist_ok=True)
     return settings
-

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 from pathlib import Path
 from typing import Iterator
@@ -11,40 +10,14 @@ from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
+from autovs.library import iter_strict_smi, structure_id
+
 RDLogger.DisableLog("rdApp.*")
 
 
 def _iter_input(path: Path) -> Iterator[tuple[str, str, dict]]:
-    suffix = path.suffix.lower()
-    if suffix in {".smi", ".smiles", ".txt"}:
-        with path.open(encoding="utf-8-sig") as handle:
-            for index, line in enumerate(handle, 1):
-                fields = line.strip().split()
-                if fields:
-                    yield fields[0], fields[1] if len(fields) > 1 else f"row_{index:09d}", {}
-    elif suffix == ".csv":
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            if not reader.fieldnames:
-                return
-            smiles_col = next((c for c in reader.fieldnames if c.lower() in {"smiles", "canonical_smiles"}), None)
-            if not smiles_col:
-                raise ValueError("CSV requires a smiles column")
-            id_col = next((c for c in reader.fieldnames if c.lower() in {"source_id", "mol_id", "id", "name"}), None)
-            for index, row in enumerate(reader, 1):
-                yield row.get(smiles_col, ""), row.get(id_col, "") if id_col else f"row_{index:09d}", row
-    elif suffix == ".sdf":
-        for index, mol in enumerate(Chem.SDMolSupplier(str(path), removeHs=False), 1):
-            if mol is not None:
-                props = mol.GetPropsAsDict()
-                source = str(props.get("source_id") or props.get("mol_id") or (mol.GetProp("_Name") if mol.HasProp("_Name") else f"row_{index:09d}"))
-                yield Chem.MolToSmiles(Chem.RemoveHs(mol)), source, {k: str(v) for k, v in props.items()}
-    else:
-        raise ValueError(f"unsupported molecular library format: {suffix}")
-
-
-def _stable_id(smiles: str) -> str:
-    return "mol_" + hashlib.sha256(smiles.encode()).hexdigest()[:12]
+    for record in iter_strict_smi(path):
+        yield record.smiles, record.molecule_id, {"input_line": str(record.line_number)}
 
 
 def prepare_library(input_path: Path, output_dir: Path, *, max_molecules: int = 1_000_000,
@@ -103,10 +76,12 @@ def prepare_library(input_path: Path, output_dir: Path, *, max_molecules: int = 
             else:
                 AllChem.UFFOptimizeMolecule(mol, maxIters=300)
                 force_field = "UFF"
-            source_id = _stable_id(canonical)
+            source_id = original_id
+            stable_structure_id = structure_id(canonical)
             mol.SetProp("_Name", source_id)
             mol.SetProp("source_id", source_id)
             mol.SetProp("original_id", original_id)
+            mol.SetProp("structure_id", stable_structure_id)
             mol.SetProp("canonical_smiles", canonical)
             for key, value in metadata.items():
                 if key and value is not None and key not in {"source_id", "canonical_smiles"}:
@@ -116,7 +91,8 @@ def prepare_library(input_path: Path, output_dir: Path, *, max_molecules: int = 
             one_writer = Chem.SDWriter(str(one_path)); one_writer.write(mol); one_writer.close()
             scaffold = MurckoScaffold.MurckoScaffoldSmiles(mol=Chem.RemoveHs(mol))
             ok_rows.append({
-                "source_id": source_id, "original_id": original_id, "smiles": canonical,
+                "source_id": source_id, "original_id": original_id, "structure_id": stable_structure_id,
+                "smiles": canonical,
                 "mw": round(mw, 4), "logp": round(logp, 4),
                 "hbd": Lipinski.NumHDonors(mol), "hba": Lipinski.NumHAcceptors(mol),
                 "rotatable_bonds": Lipinski.NumRotatableBonds(mol), "scaffold": scaffold,
@@ -139,4 +115,3 @@ def prepare_library(input_path: Path, output_dir: Path, *, max_molecules: int = 
     )
     return {"prepared_library": combined, "manifest": manifest, "failed": failed,
             "summary": summary, "prepared_count": len(ok_rows), "failed_count": len(failed_rows)}
-

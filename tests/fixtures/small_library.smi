@@ -1,5 +1,5 @@
-CC(=O)Oc1ccccc1C(=O)O aspirin
-CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O ibuprofen
-CC(=O)NC1=CC=C(C=C1)O acetaminophen
-CCN(CC)C(=O)C1=C(N(C)C)N(C)C=N1 caffeine_like
-CCN(CC)C(=O)c1ccc(N(C)C)cc1 lidocaine_like
+aspirin	CC(=O)Oc1ccccc1C(=O)O
+ibuprofen	CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O
+acetaminophen	CC(=O)NC1=CC=C(C=C1)O
+caffeine_like	CCN(CC)C(=O)C1=C(N(C)C)N(C)C=N1
+lidocaine_like	CCN(CC)C(=O)c1ccc(N(C)C)cc1

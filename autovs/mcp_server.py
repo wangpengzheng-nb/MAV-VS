@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from autovs.capabilities import health_report, list_capabilities
-from autovs.compiler import compile_strategy
+from autovs.compiler import compile_strategy, validate_workflow_bindings
 from autovs.config import load_settings
 from autovs.db import StateStore
-from autovs.schemas import JobStatus, WorkflowPlan, WorkflowStep
+from autovs.schemas import InputManifest, JobStatus, WorkflowPlan, WorkflowStep
 from autovs.tool_manager import ToolManager
 
 
@@ -35,17 +35,23 @@ def create_server():
         return health_report(settings)
 
     @mcp.tool(name="autovs_validate_workflow", annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
-    def autovs_validate_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
-        """Strictly validate WorkflowPlan v1 or normalize one evolved strategy into it."""
+    def autovs_validate_workflow(workflow: dict[str, Any], input_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Validate WorkflowPlan v1 plus optional immutable input bindings, or compile one evolved strategy."""
         try:
-            plan = WorkflowPlan.model_validate(workflow) if "plan_version" in workflow else compile_strategy(workflow)
+            manifest = InputManifest.model_validate(input_manifest) if input_manifest is not None else None
+            if "plan_version" in workflow:
+                plan = WorkflowPlan.model_validate(workflow)
+                if manifest is not None:
+                    validate_workflow_bindings(plan, manifest)
+            else:
+                plan = compile_strategy(workflow, input_manifest=manifest)
             return {"valid": True, "workflow": plan.model_dump(mode="json")}
         except Exception as exc:
             return {"valid": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    @mcp.tool(name="autovs_submit_step", annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False})
+    @mcp.tool(name="autovs_submit_step", annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True})
     def autovs_submit_step(task_id: str, step: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-        """Submit one validated, registered workflow step. Arbitrary commands are never accepted."""
+        """Submit one registered step; network access, when needed, is limited to the controlled RCSB adapter."""
         job = manager.submit(task_id, WorkflowStep.model_validate(step), inputs, background=True)
         return job.model_dump(mode="json")
 
@@ -91,4 +97,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

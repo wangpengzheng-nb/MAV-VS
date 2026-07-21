@@ -1,0 +1,16 @@
+{
+  "library_name": "PocketXMol curated 87K",
+  "version": "pocketxmol_87924_v1",
+  "format": "strict_smi_v1",
+  "source_filename": "merged_dedup.smi",
+  "source_sha256": "1bac7c742cc795712a5c52f7df440bfac03c2c7728dcda7e80455cd62ea7f7a6",
+  "source_records": 87941,
+  "conversion": "source SMILES/ID whitespace pairs -> molecule_id<TAB>canonical_isomeric_SMILES; invalid SMILES quarantined",
+  "rdkit_version": "2026.03.3",
+  "accepted_records": 87924,
+  "quarantined_records": 17,
+  "normalized_filename": "pocketxmol_87924_v1.smi",
+  "normalized_sha256": "c6d2c6aec202f07b9abf8bed30e4b31af756999f05702dedd1a9a02882af2353",
+  "rejected_filename": "pocketxmol_87924_v1.rejected.tsv",
+  "rejected_sha256": "91be9a1de1c1ae9a924618070b96c9235ebafcf38eca6255acc3c7dd23f7a8b2"
+}

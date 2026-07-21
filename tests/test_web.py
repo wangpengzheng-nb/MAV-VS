@@ -3,6 +3,7 @@ import re
 from fastapi.testclient import TestClient
 
 from web_app.server import _progress_payload, app
+import web_app.server as server_module
 
 
 def test_health_endpoint_is_persistent_service():
@@ -17,6 +18,8 @@ def test_console_and_persistent_task_list_are_available():
     assert page.status_code == 200
     assert "执行时间线" in page.text
     assert "诊断面板" in page.text
+    assert "PocketXMol curated 87K" in page.text
+    assert "ID⇥SMILES" in page.text
     assert "__STYLE_VERSION__" not in page.text
     assert "__APP_VERSION__" not in page.text
     style_url = re.search(r'href="([^"]*style\.css\?v=[a-f0-9]{12})"', page.text).group(1)
@@ -29,6 +32,40 @@ def test_console_and_persistent_task_list_are_available():
     assert response.status_code == 200
     assert isinstance(response.json()["tasks"], list)
     assert response.headers["cache-control"] == "no-store, max-age=0"
+
+
+def test_web_rejects_non_tab_smi_with_line_diagnostic():
+    client = TestClient(app)
+    response = client.post(
+        "/api/tasks",
+        data={"query": "screen a noncovalent inhibitor library"},
+        files={"library": ("bad.smi", b"CCO ethanol\n", "text/plain")},
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["line_number"] == 1
+    assert detail["error_type"] == "column_count"
+
+
+def test_web_accepts_natural_language_only_and_returns_default_warning(monkeypatch):
+    monkeypatch.setattr(server_module.service, "submit", lambda request, use_llm_planning=True: "task-default")
+    monkeypatch.setattr(server_module.service, "get_task", lambda task_id: {
+        "input_manifest": {
+            "warnings": ["未上传分子库：使用内置库。"],
+            "library_asset": {"source": "builtin", "version": "pocketxmol_87924_v1"},
+            "target_asset": {"source": "research"},
+        }
+    })
+    response = TestClient(app).post("/api/tasks", data={
+        "query": "寻找一个具有明确实验结构证据的非共价抑制剂",
+    })
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"] == "task-default"
+    assert payload["input_summary"] == {
+        "library_source": "builtin", "library_version": "pocketxmol_87924_v1", "target_source": "research",
+    }
+    assert payload["warnings"]
 
 
 def test_progress_payload_preserves_failed_stage_and_real_percent():

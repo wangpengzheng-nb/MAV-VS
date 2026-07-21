@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from autovs.pipeline import PipelineService
+from autovs.library import SmiFormatError
 from autovs.schemas import PocketSpec, TaskRequest
 from autovs.security import ensure_within
 
@@ -62,36 +63,65 @@ def list_tasks(limit: int = 20):
 
 @app.post("/api/tasks")
 async def create_task(
-    query: str = Form(...), protein: UploadFile = File(...), library: UploadFile = File(...),
+    query: str = Form(...), protein: UploadFile | None = File(None), library: UploadFile | None = File(None),
     center: str = Form(""), size: str = Form("24,24,24"), key_residues: str = Form(""),
     ligand_id: str = Form(""),
     ph: float = Form(7.4), cpu_only: bool = Form(False), baseline: bool = Form(False),
 ):
     if len(query.strip()) < 10:
         raise HTTPException(400, "任务描述至少10个字符")
+    if baseline and protein is None:
+        raise HTTPException(422, "基础链路诊断模式必须上传预处理后的 PDB 文件")
     upload_dir = Path(tempfile.mkdtemp(prefix="autovs_upload_", dir=service.settings.task_root))
-    protein_path = upload_dir / f"protein{Path(protein.filename or '.pdb').suffix.lower()}"
-    library_path = upload_dir / f"library{Path(library.filename or '.smi').suffix.lower()}"
-    with protein_path.open("wb") as out:
-        shutil.copyfileobj(protein.file, out)
-    with library_path.open("wb") as out:
-        shutil.copyfileobj(library.file, out)
+    protein_path = None
+    library_path = None
+    if protein is not None:
+        suffix = Path(protein.filename or "").suffix.lower()
+        if suffix != ".pdb":
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise HTTPException(422, "蛋白结构只接受 .pdb 文件")
+        protein_path = upload_dir / "target_structure.pdb"
+        with protein_path.open("wb") as out:
+            shutil.copyfileobj(protein.file, out)
+    if library is not None:
+        suffix = Path(library.filename or "").suffix.lower()
+        if suffix not in {".smi", ".smiles"}:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise HTTPException(422, "分子库只接受 .smi 或 .smiles 文件，格式为 molecule_id<TAB>SMILES")
+        library_path = upload_dir / f"screening_library{suffix}"
+        with library_path.open("wb") as out:
+            shutil.copyfileobj(library.file, out)
     try:
         center_value = tuple(float(x) for x in center.split(",")) if center.strip() else None
         size_value = tuple(float(x) for x in size.split(","))
         if center_value is not None and len(center_value) != 3 or len(size_value) != 3:
             raise ValueError("center and size require three comma-separated numbers")
-        request = TaskRequest(query=query, protein_path=str(protein_path), library_path=str(library_path),
+        request = TaskRequest(query=query, protein_path=str(protein_path) if protein_path else None,
+                              library_path=str(library_path) if library_path else None,
+                              protein_original_name=protein.filename if protein else None,
+                              library_original_name=library.filename if library else None,
                               pocket=PocketSpec(center=center_value, size=size_value,
                                                 key_residues=[x.strip() for x in key_residues.split(",") if x.strip()],
                                                 cocrystal_ligand=ligand_id.strip() or None),
                               ph=ph, cpu_only=cpu_only)
         task_id = service.submit(request, use_llm_planning=not baseline)
+    except SmiFormatError as exc:
+        raise HTTPException(422, exc.as_dict()) from exc
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:
         shutil.rmtree(upload_dir, ignore_errors=True)
-    return {"task_id": task_id, "status": "pending"}
+    task = service.get_task(task_id) or {}
+    manifest = task.get("input_manifest", {})
+    return {
+        "task_id": task_id, "status": "pending",
+        "warnings": manifest.get("warnings", []),
+        "input_summary": {
+            "library_source": manifest.get("library_asset", {}).get("source"),
+            "library_version": manifest.get("library_asset", {}).get("version"),
+            "target_source": manifest.get("target_asset", {}).get("source"),
+        },
+    }
 
 
 @app.get("/api/tasks/{task_id}")
@@ -173,7 +203,8 @@ def _progress_payload(task: dict) -> dict:
     phases = task.get("progress", [])
     counted = [phase for phase in phases if not (
         phase["status"] == "skipped"
-        and (phase.get("message", "").startswith("基础链路") or phase.get("message", "").startswith("未包含"))
+        and (phase.get("message", "").startswith("基础链路") or phase.get("message", "").startswith("未包含")
+             or phase.get("message", "").startswith("已锁定用户"))
     )]
     completed = sum(phase["status"] in {"succeeded", "failed", "quarantined", "cancelled"} for phase in counted)
     percent = int(100 * completed / max(1, len(counted)))

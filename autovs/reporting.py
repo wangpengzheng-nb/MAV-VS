@@ -8,19 +8,33 @@ from pathlib import Path
 def generate_report(task_id: str, task_dir: Path, *, request: dict, plan: dict,
                     results: list[dict], rejected_strategies: list[dict],
                     health: dict, jobs: list[dict], artifacts: list[dict],
-                    pocket_resolution: dict | None = None) -> dict[str, str]:
+                    pocket_resolution: dict | None = None,
+                    input_manifest: dict | None = None) -> dict[str, str]:
     report_dir = task_dir / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
     md_path, html_path = report_dir / "report.md", report_dir / "report.html"
     manifest_path = report_dir / "artifact_manifest.json"
     lines = [
         f"# AutoVS-Agent 可复现虚拟筛选报告", "", f"- Task ID: `{task_id}`",
-        f"- Query: {request.get('query', '')}", f"- Protein: `{request.get('protein_path', '')}`",
-        f"- Library: `{request.get('library_path', '')}`", f"- pH: {request.get('ph', 7.4)}", "",
-        "## 执行策略", "", f"- Strategy: `{plan.get('strategy_id', 'baseline')}`",
-        f"- Plan version: `{plan.get('plan_version', '1.0')}`", "",
-        "## 口袋预检", "",
+        f"- Query: {request.get('query', '')}", f"- pH: {request.get('ph', 7.4)}", "",
+        "## 输入绑定", "",
     ]
+    library_asset = (input_manifest or {}).get("library_asset", {})
+    target_asset = (input_manifest or {}).get("target_asset", {})
+    lines.extend([
+        f"- Library source: `{library_asset.get('source', 'unknown')}`",
+        f"- Library version: `{library_asset.get('version') or 'user-upload'}`",
+        f"- Library SHA256: `{library_asset.get('sha256', '')}`",
+        f"- Accepted / quarantined: {library_asset.get('accepted_records', '?')} / {library_asset.get('quarantined_records', '?')}",
+        f"- Target source: `{target_asset.get('source', 'unknown')}`",
+        f"- Target PDB ID: `{target_asset.get('pdb_id') or 'user-upload'}`",
+        f"- Target SHA256: `{target_asset.get('sha256', '')}`", "",
+    ])
+    warnings = (input_manifest or {}).get("warnings", [])
+    if warnings:
+        lines.extend(["### 输入提示", "", *[f"- {warning}" for warning in warnings], ""])
+    lines.extend(["## 执行策略", "", f"- Strategy: `{plan.get('strategy_id', 'baseline')}`",
+                  f"- Plan version: `{plan.get('plan_version', '1.0')}`", "", "## 口袋预检", ""])
     pocket = (pocket_resolution or {}).get("selected_pocket", {})
     if pocket:
         lines.extend([
@@ -64,9 +78,20 @@ def generate_failure_report(task_id: str, task_dir: Path, *, request: dict, erro
     report_dir = task_dir / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
     md_path, html_path = report_dir / "failure_report.md", report_dir / "failure_report.html"
+    manifest = {}
+    manifest_path = request.get("input_manifest_path")
+    if manifest_path and Path(manifest_path).is_file():
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+    library_asset = manifest.get("library_asset", {})
+    target_asset = manifest.get("target_asset", {})
     markdown = "\n".join([
         "# AutoVS-Agent 预检失败报告", "", f"- Task ID: `{task_id}`",
-        f"- Query: {request.get('query', '')}", f"- Protein: `{request.get('protein_path', '')}`", "",
+        f"- Query: {request.get('query', '')}",
+        f"- Library source: `{library_asset.get('source', 'unknown')}`",
+        f"- Target source: `{target_asset.get('source', 'unknown')}`", "",
         "## 失败原因", "", f"`{error}`", "",
         "## 计算状态", "", "未开始分子对接，未生成候选化合物或模拟科学结果。", "",
         "如果错误为 `pocket unresolved`，请提供口袋中心、可映射关键残基，或包含合理非共价配体的预处理 PDB。", "",

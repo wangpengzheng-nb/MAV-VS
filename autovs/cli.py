@@ -15,7 +15,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autovs", description="AutoVS-Agent unattended virtual screening")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="submit a virtual-screening task")
-    run.add_argument("--query", required=True); run.add_argument("--protein", "--structure", dest="protein", required=True); run.add_argument("--library", required=True)
+    run.add_argument("--query", required=True)
+    run.add_argument("--protein", "--structure", dest="protein", help="optional preprocessed protein-ligand PDB")
+    run.add_argument("--library", help="optional UTF-8 headerless molecule_id<TAB>SMILES file")
     run.add_argument("--center", nargs=3, type=float); run.add_argument("--size", nargs=3, type=float, default=[24, 24, 24])
     run.add_argument("--key-residue", action="append", default=[]); run.add_argument("--ph", type=float, default=7.4)
     run.add_argument("--ligand-id", help="optional cocrystal selector, e.g. VEN:A:201")
@@ -33,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         print(json.dumps(health_report(settings), ensure_ascii=False, indent=2)); return 0
     if args.command == "run":
+        if args.baseline and not args.protein:
+            print("baseline mode requires --protein", file=sys.stderr); return 2
         request = TaskRequest(query=args.query, protein_path=args.protein, library_path=args.library,
                               pocket=PocketSpec(center=tuple(args.center) if args.center else None, size=tuple(args.size),
                                                 key_residues=args.key_residue, cocrystal_ligand=args.ligand_id),

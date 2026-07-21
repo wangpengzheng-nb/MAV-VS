@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from autovs.schemas import (
-    ActionType, ArtifactRef, ResourceProfile, WorkflowPlan, WorkflowStep,
+    ActionType, ArtifactRef, InputManifest, ResourceProfile, WorkflowPlan, WorkflowStep,
 )
 
 
@@ -37,12 +37,76 @@ def _slug(value: str, fallback: str) -> str:
     return cleaned[:64] or fallback
 
 
-def compile_strategy(strategy: dict[str, Any]) -> WorkflowPlan:
+def _validate_asset_bindings(strategy: dict[str, Any], manifest: InputManifest | None) -> None:
+    if manifest is None:
+        return
+    steps = strategy.get("updated_pipeline") or strategy.get("pipeline") or strategy.get("pipeline_steps") or []
+    external_libraries = re.compile(r"\b(zinc|enamine|chembridge|chemdiv|pubchem|mcule)\b", re.IGNORECASE)
+    absolute_path = re.compile(r"^(?:/|~[/\\]|[A-Za-z]:[/\\])")
+    for raw in steps if isinstance(steps, list) else []:
+        action = str(raw.get("action_type", ""))
+        if action == ActionType.TARGET_STRUCTURE_ACQUISITION.value:
+            raise ValueError("target_structure_acquisition is service-owned and cannot be authored by a strategy")
+        binding_text = str({
+            "action_type": action, "description": raw.get("description", ""),
+            "input": raw.get("input", raw.get("inputs", "")),
+            "parameters": raw.get("parameters", raw.get("params", {})),
+        })
+        if external_libraries.search(binding_text):
+            raise ValueError("strategy attempts to replace locked screening_library with an external library")
+        for value in _walk_strings({"parameters": raw.get("parameters", raw.get("params", {})),
+                                    "inputs": raw.get("input", raw.get("inputs", {}))}):
+            if absolute_path.search(value) or value.lower().startswith(("http://", "https://")):
+                raise ValueError("strategy inputs may not contain absolute paths or external URLs")
+        if manifest.target_asset.locked and action in {"structure_download", "pdb_download", "structure_acquisition"}:
+            raise ValueError("strategy attempts to replace locked uploaded target_structure")
+        if manifest.target_asset.locked and re.search(r"\b(download|fetch|rcsb)\b", binding_text, re.IGNORECASE) \
+                and re.search(r"\b(pdb|structure|target)\b", binding_text, re.IGNORECASE):
+            raise ValueError("strategy attempts to replace locked uploaded target_structure")
+
+
+def _walk_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_strings(item)
+
+
+def _symbolic_inputs(action: ActionType) -> list[ArtifactRef]:
+    if action in {ActionType.MOLECULE_STANDARDIZATION, ActionType.CONFORMER_GENERATION,
+                  ActionType.PHYSICOCHEMICAL_FILTERING, ActionType.DIVERSITY_SELECTION}:
+        return [ArtifactRef(name="screening_library", format="strict_smi_v1")]
+    if action in {ActionType.PROTEIN_PREPARATION, ActionType.POCKET_DEFINITION}:
+        return [ArtifactRef(name="target_structure", format="PDB")]
+    if action == ActionType.MOLECULAR_DOCKING:
+        return [ArtifactRef(name="target_structure", format="PDB"),
+                ArtifactRef(name="screening_library", format="strict_smi_v1")]
+    return []
+
+
+def validate_workflow_bindings(plan: WorkflowPlan, manifest: InputManifest) -> None:
+    for step in plan.steps:
+        if manifest.target_asset.locked and step.action_type == ActionType.TARGET_STRUCTURE_ACQUISITION:
+            raise ValueError("uploaded target_structure is locked; acquisition is forbidden")
+        for artifact in step.inputs:
+            if artifact.path is not None:
+                raise ValueError(f"workflow input {artifact.name} may not contain an LLM-authored path")
+        for value in _walk_strings(step.parameters):
+            if re.match(r"^(?:/|~[/\\]|[A-Za-z]:[/\\])", value) or value.lower().startswith(("http://", "https://")):
+                raise ValueError("workflow parameters may not contain absolute paths or external URLs")
+
+
+def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest | None = None) -> WorkflowPlan:
     """Normalize an evolved/legacy strategy into strict WorkflowPlan v1.
 
     Unsupported scientific actions are rejected instead of silently mocked.
     Mandatory reproducibility steps are added around the strategy-defined core.
     """
+    _validate_asset_bindings(strategy, input_manifest)
     raw_steps = strategy.get("updated_pipeline") or strategy.get("pipeline") or strategy.get("pipeline_steps") or []
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("strategy has no pipeline")
@@ -71,7 +135,7 @@ def compile_strategy(strategy: dict[str, Any]) -> WorkflowPlan:
             executor, gpu = "apptainer", True
         converted.append(WorkflowStep(
             step_id=step_id, action_type=action, requires=[previous] if previous else [],
-            parameters=params or {}, quality_gates=[],
+            inputs=_symbolic_inputs(action), parameters=params or {}, quality_gates=[],
             resource_profile=ResourceProfile(executor=executor, environment=environment, gpu_required=gpu),
         ))
         previous = step_id
@@ -80,15 +144,26 @@ def compile_strategy(strategy: dict[str, Any]) -> WorkflowPlan:
     # LLM-authored copies (and their coordinates/parameters) are never executable.
     converted = [step for step in converted if step.action_type != ActionType.POCKET_DEFINITION]
 
-    mandatory_prefix = [
-        WorkflowStep(step_id="input-validation", action_type=ActionType.INPUT_VALIDATION),
-        WorkflowStep(step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION, requires=["input-validation"]),
-    ]
+    mandatory_prefix = [WorkflowStep(
+        step_id="input-validation", action_type=ActionType.INPUT_VALIDATION,
+        inputs=[ArtifactRef(name="screening_library", format="strict_smi_v1")],
+    )]
+    if input_manifest is not None and input_manifest.target_asset.source == "research":
+        mandatory_prefix.append(WorkflowStep(
+            step_id="target-structure-acquisition", action_type=ActionType.TARGET_STRUCTURE_ACQUISITION,
+            requires=[mandatory_prefix[-1].step_id],
+        ))
+    mandatory_prefix.append(WorkflowStep(
+        step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION,
+        requires=[mandatory_prefix[-1].step_id], inputs=_symbolic_inputs(ActionType.POCKET_DEFINITION),
+    ))
     existing = {s.action_type for s in converted}
     if ActionType.PROTEIN_PREPARATION not in existing:
-        converted.insert(0, WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION))
+        converted.insert(0, WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION,
+                                         inputs=_symbolic_inputs(ActionType.PROTEIN_PREPARATION)))
     if ActionType.MOLECULE_STANDARDIZATION not in existing:
-        converted.insert(0, WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION))
+        converted.insert(0, WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION,
+                                         inputs=_symbolic_inputs(ActionType.MOLECULE_STANDARDIZATION)))
 
     # Rebuild a deterministic linear dependency chain after normalization.
     ordered = mandatory_prefix + converted
@@ -101,10 +176,14 @@ def compile_strategy(strategy: dict[str, Any]) -> WorkflowPlan:
     for index, step in enumerate(ordered):
         step.requires = [ordered[index - 1].step_id] if index else []
     strategy_id = str(strategy.get("strategy_id") or strategy.get("strategy_name") or "strategy")
-    return WorkflowPlan(strategy_id=strategy_id[:120], steps=ordered)
+    plan = WorkflowPlan(strategy_id=strategy_id[:120], steps=ordered)
+    if input_manifest is not None:
+        validate_workflow_bindings(plan, input_manifest)
+    return plan
 
 
-def choose_executable_strategy(ranked_names: list[str], strategies: list[dict]) -> tuple[dict, WorkflowPlan, list[dict]]:
+def choose_executable_strategy(ranked_names: list[str], strategies: list[dict], *,
+                               input_manifest: InputManifest | None = None) -> tuple[dict, WorkflowPlan, list[dict]]:
     by_name = {str(s.get("strategy_name", "")): s for s in strategies}
     rejected: list[dict] = []
     candidates = ranked_names + [name for name in by_name if name not in ranked_names]
@@ -113,7 +192,7 @@ def choose_executable_strategy(ranked_names: list[str], strategies: list[dict]) 
         if not strategy:
             continue
         try:
-            return strategy, compile_strategy(strategy), rejected
+            return strategy, compile_strategy(strategy, input_manifest=input_manifest), rejected
         except (ValueError, ValidationError) as exc:
             rejected.append({"strategy_name": name, "reason": str(exc)})
     raise ValueError(f"no executable strategy; rejected={rejected}")

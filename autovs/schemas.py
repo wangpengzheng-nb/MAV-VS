@@ -13,6 +13,7 @@ class StrictModel(BaseModel):
 
 class ActionType(str, Enum):
     INPUT_VALIDATION = "input_validation"
+    TARGET_STRUCTURE_ACQUISITION = "target_structure_acquisition"
     PROTEIN_PREPARATION = "protein_preparation"
     POCKET_DEFINITION = "pocket_definition"
     MOLECULE_STANDARDIZATION = "molecule_standardization"
@@ -154,13 +155,66 @@ class PocketResolution(StrictModel):
 
 class TaskRequest(StrictModel):
     query: str = Field(min_length=10, max_length=5000)
-    protein_path: str
-    library_path: str
+    protein_path: str | None = None
+    library_path: str | None = None
+    protein_original_name: str | None = None
+    library_original_name: str | None = None
+    input_manifest_path: str | None = None
     pocket: PocketSpec = Field(default_factory=PocketSpec)
     known_actives_path: str | None = None
     ph: float = Field(default=7.4, ge=0.0, le=14.0)
     cpu_only: bool = False
     resume: bool = True
+
+
+class LibraryAsset(StrictModel):
+    source: Literal["user", "builtin"]
+    locked: Literal[True] = True
+    format: Literal["strict_smi_v1"] = "strict_smi_v1"
+    path: str
+    normalized_path: str | None = None
+    version: str | None = None
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    original_filename: str | None = None
+    total_records: int | None = Field(default=None, ge=0)
+    accepted_records: int | None = Field(default=None, ge=0)
+    quarantined_records: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_counts_and_version(self) -> "LibraryAsset":
+        if self.source == "builtin" and not self.version:
+            raise ValueError("builtin library requires a version")
+        counts = (self.total_records, self.accepted_records, self.quarantined_records)
+        if all(value is not None for value in counts) and self.accepted_records + self.quarantined_records != self.total_records:  # type: ignore[operator]
+            raise ValueError("accepted_records + quarantined_records must equal total_records")
+        return self
+
+
+class TargetAsset(StrictModel):
+    source: Literal["user", "research"]
+    locked: bool
+    path: str | None = None
+    pdb_id: str | None = Field(default=None, pattern=r"^[0-9][A-Za-z0-9]{3}$")
+    sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    original_filename: str | None = None
+
+    @model_validator(mode="after")
+    def validate_lock(self) -> "TargetAsset":
+        if self.source == "user" and not self.locked:
+            raise ValueError("uploaded target asset must be locked")
+        if self.locked and (not self.path or not self.sha256):
+            raise ValueError("locked target asset requires path and sha256")
+        return self
+
+
+class InputManifest(StrictModel):
+    manifest_version: Literal["1.0"] = "1.0"
+    query: str = Field(min_length=10, max_length=5000)
+    library_asset: LibraryAsset
+    target_asset: TargetAsset
+    expert_pocket: PocketSpec = Field(default_factory=PocketSpec)
+    warnings: list[str] = Field(default_factory=list)
+    constraint_summary: list[str] = Field(default_factory=list)
 
 
 class JobStatus(str, Enum):
@@ -200,6 +254,7 @@ class ToolCapability(StrictModel):
 
 class MoleculeResult(StrictModel):
     source_id: str
+    structure_id: str | None = None
     smiles: str
     docking_affinity: float | None = None
     cnn_score: float | None = None

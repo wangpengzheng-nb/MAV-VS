@@ -41,22 +41,23 @@
 
         <div class="upload-grid">
           <label class="upload-field" for="proteinInput">
-            <input id="proteinInput" type="file" accept=".pdb" required>
+            <input id="proteinInput" type="file" accept=".pdb">
             <span class="upload-type">PDB</span>
-            <span class="upload-copy"><strong>预处理蛋白</strong><small id="proteinFileName">选择 .pdb 文件</small></span>
+            <span class="upload-copy"><strong>预处理蛋白 <em>建议</em></strong><small id="proteinFileName">可选 · 蛋白–配体复合物</small></span>
             <span class="upload-action">选择</span>
           </label>
           <label class="upload-field" for="libraryInput">
-            <input id="libraryInput" type="file" accept=".smi,.smiles,.csv,.sdf" required>
-            <span class="upload-type">LIB</span>
-            <span class="upload-copy"><strong>小分子库</strong><small id="libraryFileName">SMI / CSV / SDF</small></span>
+            <input id="libraryInput" type="file" accept=".smi,.smiles">
+            <span class="upload-type">SMI</span>
+            <span class="upload-copy"><strong>小分子库 <em>建议</em></strong><small id="libraryFileName">可选 · ID⇥SMILES</small></span>
             <span class="upload-action">选择</span>
           </label>
         </div>
+        <p class="input-notice" id="defaultLibraryNotice"><strong>默认库已启用</strong> 未上传分子库时，将锁定 PocketXMol curated 87K（87,924 个有效分子）。自定义库必须为 UTF-8、无表头，每行 <code>molecule_id&lt;TAB&gt;SMILES</code>。</p>
 
         <details class="pocket-settings">
           <summary>
-            <span><strong>口袋与运行参数</strong><small>坐标可留空，将使用调研证据解析</small></span>
+            <span><strong>专家设置</strong><small>口袋坐标、关键残基与诊断模式</small></span>
             <span class="summary-icon" aria-hidden="true">+</span>
           </summary>
           <div class="settings-body">
@@ -107,6 +108,7 @@
           </div>
           <div class="task-actions"><button class="secondary-button" id="resumeBtn" type="button" hidden>继续运行</button></div>
         </div>
+        <div class="binding-strip" id="inputBindingSummary"></div>
 
         <div class="run-meter" aria-label="总体运行进度">
           <div class="meter-copy"><span id="currentPhaseLabel">正在准备任务</span><strong id="percentText">0%</strong></div>

@@ -32,6 +32,7 @@ class VerifiedPDBInfo(BaseModel):
     title: str = ""
     deposition_year: int = 0
     ligand_ids: List[str] = Field(default_factory=list, description="结合的配体ID列表(HET code)")
+    uniprot_mapped: bool = False
 
 
 class ChemblActivity(BaseModel):
@@ -785,7 +786,7 @@ class TargetScoutAgent:
     # 主入口
     # =========================================================================
 
-    def deep_research(self, query: str) -> Dict[str, Any]:
+    def deep_research(self, query: str, *, fetch_structure_coordinates: bool = True) -> Dict[str, Any]:
         log = [f"Query: {query}"]
         api_sources = []
 
@@ -1195,7 +1196,7 @@ class TargetScoutAgent:
                         pdb_id=pid, resolution=meta.get("resolution"),
                         method=meta.get("method", ""), has_ligand=meta.get("has_ligand", False),
                         title=meta.get("title", ""), deposition_year=meta.get("deposition_year", 0),
-                        ligand_ids=meta.get("ligand_ids", []),
+                        ligand_ids=meta.get("ligand_ids", []), uniprot_mapped=from_track1,
                     ).model_dump())
 
             if rejected_pdbs:
@@ -1213,12 +1214,15 @@ class TargetScoutAgent:
                 log.append(f"PDB: {len(verified_pdbs)} verified, recommended={recommended_pdb}")
 
                 # 🆕 从真实PDB文件解析配体质心坐标
-                center_data = fetch_pdb_ligand_center(recommended_pdb)
-                if center_data and center_data.get("top_ligands"):
-                    top_lig = center_data["top_ligands"][0]
-                    docking_center = top_lig["center"]
-                    log.append(f"PDB ligand center({recommended_pdb}): {docking_center}")
-                    api_sources.append(f"PDB_ligand_center:{recommended_pdb}")
+                if fetch_structure_coordinates:
+                    center_data = fetch_pdb_ligand_center(recommended_pdb)
+                    if center_data and center_data.get("top_ligands"):
+                        top_lig = center_data["top_ligands"][0]
+                        docking_center = top_lig["center"]
+                        log.append(f"PDB ligand center({recommended_pdb}): {docking_center}")
+                        api_sources.append(f"PDB_ligand_center:{recommended_pdb}")
+                else:
+                    log.append("PDB coordinate download deferred until strategy evolution and selection")
 
         # ── Step 4: 🆕 实时文献检索 ──
         search_query = f"{gene_symbol or gene} inhibitor drug discovery"
@@ -1323,7 +1327,7 @@ class TargetScoutAgent:
                                         pdb_id=pid, resolution=meta.get("resolution"),
                                         method=meta.get("method",""), has_ligand=meta.get("has_ligand",False),
                                         title=meta.get("title",""), deposition_year=meta.get("deposition_year",0),
-                                        ligand_ids=meta.get("ligand_ids",[]),
+                                        ligand_ids=meta.get("ligand_ids",[]), uniprot_mapped=True,
                                     ).model_dump())
                             log.append(f"  Corrected PDBs: {len(verified_pdbs)} found")
         # 🆕 P0: 空报告兜底 — 检查完整性和单个章节, 绝不返回空白

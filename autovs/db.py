@@ -89,6 +89,13 @@ class StateStore:
                 (status.value, json.dumps(result, ensure_ascii=False) if result is not None else None, error, utcnow(), task_id),
             )
 
+    def update_task_request(self, task_id: str, request: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET request_json=?, updated_at=? WHERE task_id=?",
+                (json.dumps(request, ensure_ascii=False), utcnow(), task_id),
+            )
+
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()

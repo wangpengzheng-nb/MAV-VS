@@ -10,12 +10,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('taskForm').addEventListener('submit', startPipeline);
   document.getElementById('queryInput').addEventListener('input', updateQueryCount);
   document.getElementById('proteinInput').addEventListener('change', event => updateFileName(event, 'proteinFileName'));
-  document.getElementById('libraryInput').addEventListener('change', event => updateFileName(event, 'libraryFileName'));
+  document.getElementById('libraryInput').addEventListener('change', event => {
+    updateFileName(event, 'libraryFileName');
+    updateDefaultLibraryNotice();
+  });
   document.getElementById('refreshTasks').addEventListener('click', loadRecentTasks);
   document.getElementById('copyTaskId').addEventListener('click', copyTaskId);
   document.getElementById('resumeBtn').addEventListener('click', resumeCurrentTask);
   document.querySelectorAll('.output-tab').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
   updateQueryCount();
+  updateDefaultLibraryNotice();
   loadHealth();
   loadRecentTasks();
   const remembered = localStorage.getItem('autovs.activeTaskId');
@@ -31,9 +35,11 @@ async function loadHealth() {
     const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
     const unavailable = capabilities.filter(item => item.availability === 'unavailable').length;
     const degraded = capabilities.filter(item => item.availability === 'degraded').length;
-    const state = unavailable ? 'degraded' : (degraded ? 'degraded' : 'available');
+    const state = data.status === 'unavailable' ? 'unavailable' : (unavailable || degraded ? 'degraded' : 'available');
     container.className = `system-state ${state}`;
-    document.getElementById('healthText').textContent = unavailable || degraded
+    document.getElementById('healthText').textContent = data.status === 'unavailable'
+      ? '默认库或核心环境不可用'
+      : unavailable || degraded
       ? `环境可运行 · ${unavailable + degraded} 项降级`
       : '计算环境可用';
   } catch (_) {
@@ -70,18 +76,26 @@ async function startPipeline(event) {
   const library = document.getElementById('libraryInput').files[0];
   const errorBox = document.getElementById('formError');
   errorBox.hidden = true;
-  if (query.length < 10 || !protein || !library) {
-    showFormError('请填写至少 10 个字符的筛选目标，并上传蛋白 PDB 与分子库。');
+  if (query.length < 10) {
+    showFormError('请填写至少 10 个字符的自然语言筛选目标。蛋白和分子库均为可选。');
     return;
   }
-  if (!protein.name.toLowerCase().endsWith('.pdb')) {
+  if (protein && !protein.name.toLowerCase().endsWith('.pdb')) {
     showFormError('蛋白文件必须是预处理后的 .pdb 文件。');
+    return;
+  }
+  if (library && !/\.(smi|smiles)$/i.test(library.name)) {
+    showFormError('分子库只接受 .smi 或 .smiles，且每行必须为 molecule_id<TAB>SMILES。');
+    return;
+  }
+  if (document.getElementById('baselineMode').checked && !protein) {
+    showFormError('基础链路诊断会跳过调研，因此必须上传预处理后的 PDB。');
     return;
   }
   const form = new FormData();
   form.append('query', query);
-  form.append('protein', protein);
-  form.append('library', library);
+  if (protein) form.append('protein', protein);
+  if (library) form.append('library', library);
   form.append('center', document.getElementById('centerInput').value.trim());
   form.append('size', document.getElementById('sizeInput').value.trim());
   form.append('key_residues', document.getElementById('residueInput').value.trim());
@@ -92,8 +106,9 @@ async function startPipeline(event) {
   try {
     const response = await fetch('/api/tasks', {method: 'POST', body: form});
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || '任务提交失败');
-    showToast(`任务 ${data.task_id} 已进入队列`);
+    if (!response.ok) throw new Error(formatApiError(data.detail));
+    const warning = (data.warnings || [])[0];
+    showToast(warning || `任务 ${data.task_id} 已进入队列`);
     await openTask(data.task_id);
     loadRecentTasks();
   } catch (error) {
@@ -159,14 +174,31 @@ async function refreshCurrentTask() {
 function renderFullTask(task) {
   lastTask = task;
   document.getElementById('taskQuery').textContent = task.request?.query || task.query || '虚拟筛选任务';
+  renderInputManifest(task.input_manifest || task.result?.input_manifest);
   renderSnapshot(snapshotFromTask(task));
   renderOutputs(task);
+}
+
+function renderInputManifest(manifest) {
+  const container = document.getElementById('inputBindingSummary');
+  if (!manifest) {
+    container.innerHTML = '<span class="binding-chip"><b>INPUT</b> 等待输入绑定</span>';
+    return;
+  }
+  const library = manifest.library_asset || {};
+  const target = manifest.target_asset || {};
+  const accepted = library.accepted_records == null ? '' : ` · ${Number(library.accepted_records).toLocaleString('zh-CN')} 个`;
+  container.innerHTML = `
+    <span class="binding-chip"><b>LIBRARY</b> ${escapeHtml(library.source === 'builtin' ? library.version || '内置库' : library.original_filename || '用户库')}${escapeHtml(accepted)}</span>
+    <span class="binding-chip"><b>TARGET</b> ${escapeHtml(target.source === 'user' ? target.original_filename || '用户 PDB' : target.pdb_id || '调研后获取')}</span>
+    <span class="binding-chip"><b>LOCK</b> 分子库锁定 · ${target.locked ? '结构已锁定' : '等待结构获取'}</span>
+    ${(manifest.warnings || []).map(item => `<span class="binding-warning">${escapeHtml(item)}</span>`).join('')}`;
 }
 
 function snapshotFromTask(task) {
   const phases = task.progress || [];
   const counted = phases.filter(phase => !(phase.status === 'skipped'
-    && (phase.message?.startsWith('基础链路') || phase.message?.startsWith('未包含'))));
+    && (phase.message?.startsWith('基础链路') || phase.message?.startsWith('未包含') || phase.message?.startsWith('已锁定用户'))));
   const completed = counted.filter(phase => ['succeeded', 'failed', 'quarantined', 'cancelled'].includes(phase.status)).length;
   const current = phases.find(phase => phase.status === 'running')
     || [...phases].reverse().find(phase => phase.status === 'failed')
@@ -349,6 +381,23 @@ function updateQueryCount() {
 function updateFileName(event, targetId) {
   const file = event.target.files[0];
   document.getElementById(targetId).textContent = file ? `${file.name} · ${formatBytes(file.size)}` : '尚未选择文件';
+}
+function updateDefaultLibraryNotice() {
+  const file = document.getElementById('libraryInput').files[0];
+  const notice = document.getElementById('defaultLibraryNotice');
+  notice.classList.toggle('user-library', Boolean(file));
+  notice.innerHTML = file
+    ? '<strong>用户库将被锁定</strong> 策略生成、进化和工具执行不得替换或补充其他库。格式必须为 UTF-8、无表头，每行 <code>molecule_id&lt;TAB&gt;SMILES</code>。'
+    : '<strong>默认库已启用</strong> 未上传分子库时，将锁定 PocketXMol curated 87K（87,924 个有效分子）。自定义库必须为 UTF-8、无表头，每行 <code>molecule_id&lt;TAB&gt;SMILES</code>。';
+}
+function formatApiError(detail) {
+  if (!detail) return '任务提交失败';
+  if (typeof detail === 'string') return detail;
+  if (detail.error_type) {
+    const line = detail.line_number ? `第 ${detail.line_number} 行` : '文件';
+    return `${line}格式错误（${detail.error_type}）：${detail.detail || ''}。要求：molecule_id<TAB>SMILES。`;
+  }
+  return JSON.stringify(detail);
 }
 function setSubmitState(running) {
   const button = document.getElementById('runBtn');

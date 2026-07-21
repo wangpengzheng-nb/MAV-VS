@@ -5,7 +5,7 @@ from autovs.schemas import TaskRequest
 
 def test_pipeline_failure_identifies_stage_and_indexes_diagnostics(tmp_path):
     protein = tmp_path / "invalid.pdb"; protein.write_text("HEADER INVALID\nEND\n")
-    library = tmp_path / "library.smi"; library.write_text("CCO ethanol\n")
+    library = tmp_path / "library.smi"; library.write_text("ethanol\tCCO\n")
     settings = Settings(raw={
         "service": {"database": str(tmp_path / "state.sqlite3"), "task_root": str(tmp_path / "tasks"),
                     "host": "127.0.0.1", "port": 8765},

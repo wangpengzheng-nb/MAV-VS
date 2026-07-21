@@ -84,8 +84,13 @@ textarea:focus, input[type="text"]:focus { border-color: var(--blue); box-shadow
 .upload-type { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 8px; background: #dfeef2; color: var(--blue-deep); font-family: var(--mono); font-size: 10px; font-weight: 800; }
 .upload-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .upload-copy strong { font-size: 12px; }
+.upload-copy strong em { color: var(--blue); font-size: 8px; font-style: normal; font-weight: 700; letter-spacing: .05em; }
 .upload-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .upload-action { color: var(--blue); font-size: 11px; font-weight: 700; }
+.input-notice { margin: 10px 0 0; padding: 10px 11px; border: 1px solid #c9dadd; border-radius: 8px; background: #edf6f7; color: #526a72; font-size: 9px; line-height: 1.65; }
+.input-notice strong { color: var(--blue-deep); }
+.input-notice code { color: var(--blue-deep); font-family: var(--mono); }
+.input-notice.user-library { border-color: #cde3dc; background: #eef8f5; }
 
 .pocket-settings { margin: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .pocket-settings summary { display: flex; align-items: center; justify-content: space-between; padding: 15px 1px; cursor: pointer; list-style: none; }
@@ -156,6 +161,10 @@ textarea:focus, input[type="text"]:focus { border-color: var(--blue); box-shadow
 .task-id-line { display: flex; align-items: center; gap: 9px; }
 .task-id-line code { color: var(--muted); font-family: var(--mono); font-size: 10px; }
 .task-id-line button { border: 0; background: none; color: var(--blue); cursor: pointer; font-size: 9px; }
+.binding-strip { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 0 0; }
+.binding-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 9px; }
+.binding-chip b { color: var(--blue-deep); font-family: var(--mono); font-size: 8px; text-transform: uppercase; }
+.binding-warning { width: 100%; padding: 8px 10px; border-left: 3px solid #c48a33; background: #fff7e8; color: #775a2b; font-size: 9px; }
 .secondary-button { padding: 8px 12px; border: 1px solid #b9cbd0; border-radius: 7px; background: white; color: var(--blue-deep); cursor: pointer; font-size: 11px; font-weight: 700; }
 
 .run-meter { padding: 24px 0 25px; }

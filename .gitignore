@@ -49,4 +49,14 @@ node_modules/
 package.json
 package-lock.json
 
+# ── 测试缓存和临时文件 ──
+.pytest_cache/
+mock.pdb
+test.smi
+gmx_MMPBSA.log
+
+# ── PPT 文件 ──
+虚拟筛选智能体系统.pptx
+AutoVS-Agent_汇报演示.pptx
+
 # ── 测试文件 ──

@@ -144,7 +144,9 @@ class StrategyGeneratorAgent:
                 print(f"  响应结尾: {raw_json[-300:]}", flush=True)
 
         # 3次都失败: 简化prompt再试
-        simple_prompt = f"""为靶点{target_name}({target_gene})设计5个虚拟筛选策略。输出JSON。"""
+        simple_prompt = f"""为靶点{target_name}({target_gene})设计5个虚拟筛选策略。输出JSON。
+必须遵守以下不可变执行上下文，不得替换 screening_library 或 target_structure：
+{prior_knowledge[:2000]}"""
         strategies, _ = self._call_llm(simple_prompt, target_name, target_gene, vector_db_path)
         if strategies and len(strategies) >= 3:
             return {"strategies": strategies, "generation_rationale": "简化prompt重试成功"}
@@ -173,7 +175,7 @@ class StrategyGeneratorAgent:
 
 请从用户任务中提取所有操作细节, 逐条对照填入策略:
 1. **库来源**: 用户指定了什么化合物库? 库大小? → 必须使用用户指定的库! 禁止改用ZINC/Enamine!
-2. **口袋/靶点类型**: PPI? 激酶? 别构? → 必须匹配对应工具! PPI用Diffdock, 其他用gnina!
+2. **口袋/靶点类型**: PPI? 激酶? 别构? → 必须设计匹配的科学步骤；具体工具只由下游能力目录绑定!
 3. **排除条件**: 用户说了"不要X/禁止X/避开X"? → 策略中必须有对应的排除/过滤步骤!
 4. **特殊要求**: 分子量范围? 选择性要求? ADMET? → 策略中必须明确体现!
 5. **数值约束**: 用户给了具体数值(库大小/MW/IC50)? → 策略阈值必须基于此, 禁止用泛化默认值!
