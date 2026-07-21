@@ -30,13 +30,19 @@
         <div class="section-heading">
           <span class="section-kicker">NEW RUN</span>
           <h1>定义筛选任务</h1>
-          <p>上传预处理蛋白和分子库，系统将固化每一步计算证据。</p>
+          <p>输入靶点基因缩写和筛选要求，系统将固化每一步计算证据。</p>
         </div>
 
+        <label class="field field-query" for="targetGeneInput">
+          <span class="field-label">靶点基因 <b>必需</b></span>
+          <input type="text" id="targetGeneInput" maxlength="50" placeholder="例如：PTGER2、EP2、BCL2、EGFR、KRAS" required autocomplete="off">
+          <span class="field-meta"><span>英文基因缩写，调研智能体直接据此检索</span></span>
+        </label>
+
         <label class="field field-query" for="queryInput">
-          <span class="field-label">筛选目标 <b>必需</b></span>
-          <textarea id="queryInput" rows="5" maxlength="5000" placeholder="例如：寻找针对 BCL2 的非共价小分子抑制剂，优先保留与 ASP103 和 TRP144 的关键作用。" required></textarea>
-          <span class="field-meta"><span>说清靶点、机制和筛选偏好</span><span id="queryCount">0 / 5000</span></span>
+          <span class="field-label">筛选要求 <b>必需</b></span>
+          <textarea id="queryInput" rows="4" maxlength="3000" placeholder="例如：寻找共价抑制剂，MW 300-600，LogP 1-5。&#10;例如：寻找PROTAC分子，作用于巨噬细胞。&#10;例如：寻找非共价抑制剂，排除PAINS。" required></textarea>
+          <span class="field-meta"><span>机制、偏好、数值约束等</span><span id="queryCount">0 / 3000</span></span>
         </label>
 
         <div class="upload-grid">
@@ -106,7 +112,7 @@
             <h2 id="taskQuery">虚拟筛选任务</h2>
             <div class="task-id-line"><code id="taskId"></code><button id="copyTaskId" type="button">复制 ID</button></div>
           </div>
-          <div class="task-actions"><button class="secondary-button" id="resumeBtn" type="button" hidden>继续运行</button></div>
+          <div class="task-actions"><button class="secondary-button" id="pauseBtn" type="button" hidden>暂停任务</button><button class="secondary-button" id="cancelBtn" type="button" hidden>取消任务</button><button class="secondary-button" id="resumeBtn" type="button" hidden>继续运行</button></div>
         </div>
         <div class="binding-strip" id="inputBindingSummary"></div>
 

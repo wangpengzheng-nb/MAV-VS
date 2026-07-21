@@ -225,6 +225,7 @@ class JobStatus(str, Enum):
     SKIPPED = "skipped"
     QUARANTINED = "quarantined"
     CANCELLED = "cancelled"
+    PAUSED = "paused"
 
 
 class JobRecord(StrictModel):

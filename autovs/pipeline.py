@@ -25,6 +25,11 @@ from autovs.security import sha256_file
 from autovs.tool_manager import ToolManager
 
 
+class _TaskPaused(Exception):
+    """内部信号：任务已暂停，用于从 _run_existing 中优雅退出。"""
+    pass
+
+
 PIPELINE_PHASES = [
     ("input_validation", "输入校验"),
     ("target_research", "靶点调研"),
@@ -67,11 +72,14 @@ class PipelineService:
         self.settings = settings or load_settings()
         self.store = StateStore(self.settings.database_path)
         self.tools = ToolManager(self.settings, self.store)
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._pause_events: dict[str, threading.Event] = {}
 
     def submit(self, request: TaskRequest, *, use_llm_planning: bool = True) -> str:
         staged, task_dir = self._stage_request(request)
         task_id = self.store.create_task(staged.model_dump(mode="json"), task_dir)
         self._initialize_progress(task_id, use_llm_planning)
+        self._cancel_events[task_id] = threading.Event()
         threading.Thread(target=self._run_existing, args=(task_id, use_llm_planning), daemon=True).start()
         return task_id
 
@@ -86,8 +94,11 @@ class PipelineService:
         task = self.store.get_task(task_id)
         if not task:
             raise ValueError(f"unknown task_id: {task_id}")
-        if task["status"] == JobStatus.RUNNING.value:
-            raise ValueError("task is already running")
+        allowed = {JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.PAUSED.value}
+        if task["status"] not in allowed:
+            raise ValueError(f"只能续跑已暂停、已取消或已失败的任务，当前状态: {task['status']}")
+        self._pause_events.pop(task_id, None)
+        self._cancel_events.pop(task_id, None)
         threading.Thread(target=self._run_existing, args=(task_id, True), daemon=True).start()
 
     def get_task(self, task_id: str) -> dict | None:
@@ -100,6 +111,60 @@ class PipelineService:
             if manifest_path and Path(manifest_path).is_file():
                 task["input_manifest"] = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
         return task
+
+    def cancel_task(self, task_id: str) -> bool:
+        """取消正在运行的任务。返回True表示已发出取消信号。"""
+        task = self.store.get_task(task_id)
+        if not task:
+            return False
+        if task["status"] not in {"pending", "running"}:
+            return False
+        # 发出取消信号
+        cancel_evt = self._cancel_events.get(task_id)
+        if cancel_evt:
+            cancel_evt.set()
+        self.store.update_task(task_id, JobStatus.CANCELLED)
+        self.store.cancel_running_progress(task_id)
+        return True
+
+    def pause_task(self, task_id: str) -> bool:
+        """暂停正在运行的任务，保留已完成阶段的成果。返回True表示已发出暂停信号。"""
+        task = self.store.get_task(task_id)
+        if not task:
+            return False
+        if task["status"] != JobStatus.RUNNING.value:
+            return False
+        pause_evt = self._pause_events.get(task_id)
+        if pause_evt:
+            pause_evt.set()
+        return True
+
+    def _is_paused(self, task_id: str) -> bool:
+        evt = self._pause_events.get(task_id)
+        return evt.is_set() if evt else False
+
+    def _is_cancelled(self, task_id: str) -> bool:
+        evt = self._cancel_events.get(task_id)
+        return evt.is_set() if evt else False
+
+    def delete_task(self, task_id: str) -> dict:
+        """永久删除已完成/失败/已取消的任务（数据库记录 + 磁盘目录）。
+        对运行中或等待中的任务会拒绝删除。"""
+        import shutil
+        task = self.store.get_task(task_id)
+        if not task:
+            raise ValueError(f"任务不存在: {task_id}")
+        if task["status"] in {JobStatus.PENDING.value, JobStatus.RUNNING.value}:
+            raise ValueError(f"任务正在运行或等待中，无法删除。请先取消任务。")
+        # 清理取消事件引用
+        self._cancel_events.pop(task_id, None)
+        # 删除磁盘上的任务目录
+        task_dir = Path(task.get("task_dir", ""))
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        # 删除数据库记录
+        self.store.delete_task(task_id)
+        return {"task_id": task_id, "deleted": True}
 
     def _initialize_progress(self, task_id: str, use_llm_planning: bool) -> None:
         self.store.initialize_progress(task_id, PIPELINE_PHASES)
@@ -179,21 +244,65 @@ class PipelineService:
         if not task:
             return
         self.store.update_task(task_id, JobStatus.RUNNING)
+        # 重置 pause 信号（resume 时已清理，submit 时是新任务）
+        self._pause_events.setdefault(task_id, threading.Event()).clear()
         task_dir = Path(task["task_dir"])
         request = TaskRequest.model_validate(task["request"])
         rejected: list[dict] = []
+
+        # 读取当前进度，判断哪些阶段已完成（用于续跑跳过）
+        def _phase_done(phase_id: str) -> bool:
+            for p in self.store.list_progress(task_id):
+                if p["phase_id"] == phase_id and p["status"] == "succeeded":
+                    return True
+            return False
+
+        def _check_pause() -> None:
+            """如果收到暂停信号，优雅退出。"""
+            if self._is_paused(task_id):
+                self.store.update_task(task_id, JobStatus.PAUSED)
+                raise _TaskPaused()
+
         try:
+            _check_pause()
+            if self._is_cancelled(task_id):
+                raise RuntimeError("task cancelled by user")
             if not request.input_manifest_path:
                 request = self._migrate_legacy_request(task_id, request, task_dir)
-            validation = self._run_step(
-                task_id, WorkflowStep(step_id="input-validation", action_type=ActionType.INPUT_VALIDATION),
-                {"protein_path": request.protein_path, "library_path": request.library_path,
-                 "input_manifest_path": request.input_manifest_path},
-            )
-            normalized_library = str(validation["normalized_library"])
-            manifest = self._update_library_manifest(request, validation)
+
+            # ── 阶段1: 输入校验 ──
+            if not _phase_done("input_validation"):
+                validation = self._run_step(
+                    task_id, WorkflowStep(step_id="input-validation", action_type=ActionType.INPUT_VALIDATION),
+                    {"protein_path": request.protein_path, "library_path": request.library_path,
+                     "input_manifest_path": request.input_manifest_path},
+                )
+                manifest = self._update_library_manifest(request, validation)
+                normalized_library = str(validation["normalized_library"])
+            else:
+                manifest = self._read_input_manifest(request)
+                normalized_library = manifest.library_asset.normalized_path or manifest.library_asset.path
+                if not normalized_library:
+                    raise ValueError("续跑失败: 找不到归一化分子库路径")
+
+            _check_pause()
+
+            # ── 阶段2: LLM 规划（内部各子阶段已支持 checkpoint 续跑）──
             if use_llm_planning:
                 planning = self._run_planning(task_id, request, task_dir, manifest)
+            else:
+                if not request.protein_path:
+                    raise ValueError("baseline mode requires an uploaded preprocessed PDB structure")
+                plan = build_cpu_baseline_plan()
+                planning = {"mode": "deterministic_cpu_baseline", "ranked_names": [plan.strategy_id]}
+
+            _check_pause()
+
+            # ── 阶段3: 策略选择 ──
+            plan_path = task_dir / "workflow_plan.json"
+            if _phase_done("strategy_selection") and plan_path.is_file():
+                plan = WorkflowPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+            elif use_llm_planning:
                 self.store.update_progress(task_id, "strategy_selection", JobStatus.RUNNING,
                                            message="按投票排名校验候选策略")
                 _, plan, rejected = choose_executable_strategy(
@@ -204,28 +313,43 @@ class PipelineService:
                     message=f"已选择可执行策略：{plan.strategy_id}",
                     metadata={"strategy_id": plan.strategy_id, "rejected_count": len(rejected)},
                 )
+                plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+                self._index_artifact(task_id, "workflow_plan", plan_path)
             else:
                 if not request.protein_path:
                     raise ValueError("baseline mode requires an uploaded preprocessed PDB structure")
                 plan = build_cpu_baseline_plan()
+                plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+                self._index_artifact(task_id, "workflow_plan", plan_path)
                 planning = {"mode": "deterministic_cpu_baseline", "ranked_names": [plan.strategy_id]}
                 self.store.update_progress(task_id, "strategy_selection", JobStatus.SUCCEEDED,
                                            message="已选择确定性 CPU 基线策略",
                                            metadata={"strategy_id": plan.strategy_id})
-            plan_path = task_dir / "workflow_plan.json"
-            plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
-            self._index_artifact(task_id, "workflow_plan", plan_path)
+
+            _check_pause()
+
+            # ── 阶段4: 靶结构获取 + 口袋解析 ──
             protein_path, pocket_resolution = self._resolve_target_and_pocket(
                 task_id, request, task_dir, planning, plan,
             )
             planning["pocket_resolution"] = pocket_resolution.model_dump(mode="json")
+
+            _check_pause()
+
+            # ── 阶段5: 核心执行（对接、PLIP、排序、报告）──
             result = self._execute_core(
                 task_id, request, plan, rejected, planning,
                 protein_path=protein_path, library_path=normalized_library,
             )
             self.store.finish_pending_progress(task_id, message="未包含在本次可执行策略中")
             self.store.update_task(task_id, JobStatus.SUCCEEDED, result=result)
+
         except Exception as exc:
+            if self._is_paused(task_id):
+                # 暂停是正常行为，不记录错误
+                return
+            if type(exc).__name__ == "_TaskPaused":  # 内部暂停信号
+                return
             error = f"{type(exc).__name__}: {exc}"
             self.store.fail_running_progress(task_id, error=error)
             self.store.finish_pending_progress(task_id, message="上游阶段失败，未执行")
@@ -253,61 +377,103 @@ class PipelineService:
         from src.agents.strategy_generator import StrategyGeneratorAgent
         from src.agents.target_scout import TargetScoutAgent
 
-        self.store.update_progress(task_id, "target_research", JobStatus.RUNNING,
-                                   message="正在检索并验证靶点结构证据")
-        research = TargetScoutAgent().deep_research(request.query, fetch_structure_coordinates=False)
-        research["_user_query"] = request.query
+        # 检查各子阶段是否已完成（支持从暂停点继续）
+        def _sub_phase_done(phase_id: str) -> bool:
+            for p in self.store.list_progress(task_id):
+                if p["phase_id"] == phase_id and p["status"] == "succeeded":
+                    return True
+            return False
+
+        # ── 子阶段1: 靶点调研 ──
+        if _sub_phase_done("target_research"):
+            research_path = task_dir / "research.json"
+            research = json.loads(research_path.read_text(encoding="utf-8")) if research_path.is_file() else {}
+        else:
+            self.store.update_progress(task_id, "target_research", JobStatus.RUNNING,
+                                       message="正在检索并验证靶点结构证据")
+            research = TargetScoutAgent().deep_research(request.query, fetch_structure_coordinates=False)
+            research["_user_query"] = request.query
+            research_path = task_dir / "research.json"
+            research_path.write_text(json.dumps(research, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            self._index_artifact(task_id, "research", research_path)
+            self.store.update_progress(task_id, "target_research", JobStatus.SUCCEEDED,
+                                       message="靶点调研已完成，证据已固化为 research.json")
         execution_context = self._execution_context(manifest)
         research["_execution_context"] = execution_context
         binding_rules = json.dumps(execution_context, ensure_ascii=False, separators=(",", ":"))
-        research_path = task_dir / "research.json"
-        research_path.write_text(json.dumps(research, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        self._index_artifact(task_id, "research", research_path)
-        self.store.update_progress(task_id, "target_research", JobStatus.SUCCEEDED,
-                                   message="靶点调研已完成，证据已固化为 research.json")
-        self.store.update_progress(task_id, "strategy_generation", JobStatus.RUNNING,
-                                   message="正在生成结构化虚拟筛选策略")
-        strategies = StrategyGeneratorAgent().generate_strategies(research, prior_knowledge=binding_rules)["strategies"]
-        strategies_path = task_dir / "strategies.json"
-        strategies_path.write_text(json.dumps(strategies, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._index_artifact(task_id, "strategies", strategies_path)
-        self.store.update_progress(task_id, "strategy_generation", JobStatus.SUCCEEDED,
-                                   message=f"已生成 {len(strategies)} 套候选策略")
+        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
 
-        reviewer, aggregator = TournamentReviewer(), VoteAggregator()
-        match_count = len(list(itertools.combinations(strategies, 2)))
-        self.store.update_progress(task_id, "strategy_voting", JobStatus.RUNNING,
-                                   message=f"正在执行 {match_count} 组全排列对比")
-        for pair_index, (a, b) in enumerate(itertools.combinations(strategies, 2), 1):
-            match_id = f"match-{pair_index:03d}"
-            with ThreadPoolExecutor(max_workers=len(REVIEWER_CONFIGS)) as pool:
-                futures = [pool.submit(reviewer.compare_strategies, a, b, research, request.query, binding_rules,
-                                       reviewer_id=cfg["id"], match_id=match_id) for cfg in REVIEWER_CONFIGS]
-                for future in as_completed(futures):
-                    aggregator.add_result(future.result())
-        ranking = aggregator.rank(strategies)
-        diagnostics = aggregator.generate_diagnostic(top_n=4)
-        evaluation = {"results": aggregator.results, "ranking": ranking, "diagnostics": diagnostics}
-        evaluation_path = task_dir / "evaluation.json"
-        evaluation_path.write_text(json.dumps(evaluation, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._index_artifact(task_id, "strategy_evaluation", evaluation_path)
-        self.store.update_progress(task_id, "strategy_voting", JobStatus.SUCCEEDED,
-                                   message=f"投票完成，已产生 {len(ranking)} 项排名")
-        diagnostic_map = {}
-        for item in ranking[:4]:
-            name = item["strategy_name"]
-            strategy = next(s for s in strategies if s["strategy_name"] == name)
-            diagnostic_map[name] = aggregator.prepare_evolution_input(strategy, name)["diagnosis"]
-        self.store.update_progress(task_id, "strategy_evolution", JobStatus.RUNNING,
-                                   message="正在进化投票排名最高的策略")
-        evolved = StrategyEvolver().evolve_top_n(
-            strategies, diagnostic_map, [], research, request.query, n=4, prior_knowledge=binding_rules,
-        )
-        evolved_path = task_dir / "evolved_strategies.json"
-        evolved_path.write_text(json.dumps(evolved, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._index_artifact(task_id, "evolved_strategies", evolved_path)
-        self.store.update_progress(task_id, "strategy_evolution", JobStatus.SUCCEEDED,
-                                   message=f"已进化 {len(evolved)} 套策略")
+        # ── 子阶段2: 策略生成 ──
+        if _sub_phase_done("strategy_generation"):
+            strategies_path = task_dir / "strategies.json"
+            strategies = json.loads(strategies_path.read_text(encoding="utf-8")) if strategies_path.is_file() else []
+        else:
+            self.store.update_progress(task_id, "strategy_generation", JobStatus.RUNNING,
+                                       message="正在生成结构化虚拟筛选策略")
+            strategies = StrategyGeneratorAgent().generate_strategies(research, prior_knowledge=binding_rules)["strategies"]
+            strategies_path = task_dir / "strategies.json"
+            strategies_path.write_text(json.dumps(strategies, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._index_artifact(task_id, "strategies", strategies_path)
+            self.store.update_progress(task_id, "strategy_generation", JobStatus.SUCCEEDED,
+                                       message=f"已生成 {len(strategies)} 套候选策略")
+        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
+
+        if not strategies:
+            raise RuntimeError("无可用策略：请检查策略生成日志")
+
+        # ── 子阶段3: 全排列投票 ──
+        if _sub_phase_done("strategy_voting"):
+            evaluation_path = task_dir / "evaluation.json"
+            if evaluation_path.is_file():
+                evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            else:
+                evaluation = {"ranking": [{"strategy_name": s.get("strategy_name", "")} for s in strategies],
+                              "diagnostics": {}}
+        else:
+            reviewer, aggregator = TournamentReviewer(), VoteAggregator()
+            match_count = len(list(itertools.combinations(strategies, 2)))
+            self.store.update_progress(task_id, "strategy_voting", JobStatus.RUNNING,
+                                       message=f"正在执行 {match_count} 组全排列对比")
+            for pair_index, (a, b) in enumerate(itertools.combinations(strategies, 2), 1):
+                match_id = f"match-{pair_index:03d}"
+                with ThreadPoolExecutor(max_workers=len(REVIEWER_CONFIGS)) as pool:
+                    futures = [pool.submit(reviewer.compare_strategies, a, b, research, request.query, binding_rules,
+                                           reviewer_id=cfg["id"], match_id=match_id) for cfg in REVIEWER_CONFIGS]
+                    for future in as_completed(futures):
+                        aggregator.add_result(future.result())
+            ranking = aggregator.rank(strategies)
+            diagnostics = aggregator.generate_diagnostic(top_n=4)
+            evaluation = {"results": aggregator.results, "ranking": ranking, "diagnostics": diagnostics}
+            evaluation_path = task_dir / "evaluation.json"
+            evaluation_path.write_text(json.dumps(evaluation, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._index_artifact(task_id, "strategy_evaluation", evaluation_path)
+            self.store.update_progress(task_id, "strategy_voting", JobStatus.SUCCEEDED,
+                                       message=f"投票完成，已产生 {len(ranking)} 项排名")
+        ranking = evaluation.get("ranking", [])
+        diagnostics = evaluation.get("diagnostics", {})
+        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
+
+        # ── 子阶段4: 策略进化 ──
+        if _sub_phase_done("strategy_evolution"):
+            evolved_path = task_dir / "evolved_strategies.json"
+            evolved = json.loads(evolved_path.read_text(encoding="utf-8")) if evolved_path.is_file() else strategies
+        else:
+            diagnostic_map = {}
+            for item in ranking[:4]:
+                name = item["strategy_name"]
+                strategy = next((s for s in strategies if s["strategy_name"] == name), None)
+                if strategy:
+                    diagnostic_map[name] = aggregator.prepare_evolution_input(strategy, name)["diagnosis"]
+            self.store.update_progress(task_id, "strategy_evolution", JobStatus.RUNNING,
+                                       message="正在进化投票排名最高的策略")
+            evolved = StrategyEvolver().evolve_top_n(
+                strategies, diagnostic_map, [], research, request.query, n=4, prior_knowledge=binding_rules,
+            )
+            evolved_path = task_dir / "evolved_strategies.json"
+            evolved_path.write_text(json.dumps(evolved, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._index_artifact(task_id, "evolved_strategies", evolved_path)
+            self.store.update_progress(task_id, "strategy_evolution", JobStatus.SUCCEEDED,
+                                       message=f"已进化 {len(evolved)} 套策略")
         return {"ranked_names": [item["strategy_name"] for item in ranking], "evolved_strategies": evolved,
                 "execution_context": execution_context}
 
@@ -492,13 +658,16 @@ class PipelineService:
         pocket_resolution = PocketResolution.model_validate(planning["pocket_resolution"])
         pocket_data = pocket_resolution.selected_pocket
         prep_step = by_action.get(ActionType.MOLECULE_STANDARDIZATION) or WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION)
+        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
         prepared = self._run_step(task_id, prep_step, {"library_path": library_path})
+        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
         protein = self._run_step(task_id, by_action.get(ActionType.PROTEIN_PREPARATION, WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION)),
                                  {"protein_path": protein_path})
 
         docking_step = by_action.get(ActionType.MOLECULAR_DOCKING)
         if not docking_step:
             raise RuntimeError("selected strategy does not contain molecular_docking")
+        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
         docking = self._run_step(task_id, docking_step, {
             "receptor_pdbqt": protein["receptor_pdbqt"], "ligands_sdf": prepared["prepared_library"],
             "manifest_csv": prepared["manifest"], "center": pocket_data.center, "size": pocket_data.size,

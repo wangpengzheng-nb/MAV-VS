@@ -99,7 +99,7 @@ for _m in [ActionInput, ActionOutput, PipelineAction, TargetProfile,
 
 
 class StrategyGeneratorAgent:
-    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.5, max_tokens=16384):
+    def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.5, max_tokens=8192):
         self.model = model
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
@@ -114,7 +114,7 @@ class StrategyGeneratorAgent:
         return self._client
 
     def generate_strategies(self, research_report: dict, target_info=None, prior_knowledge: str = ""):
-        # 🆕 优先使用执行摘要, 否则 fallback 到完整报告
+        # 优先使用执行摘要, 否则 fallback 到完整报告
         summary = research_report.get("executive_summary", "")
         if summary:
             report_text = summary
@@ -126,34 +126,107 @@ class StrategyGeneratorAgent:
         target_name = research_report.get("target_name", "Unknown")
         target_gene = research_report.get("gene_symbol", "")
         target_uniprot = research_report.get("uniprot_id", "")
-
-        # 🆕 向量数据库路径
         vector_db_path = research_report.get("_vector_db_path", "")
-
         user_query = research_report.get("_user_query", "")
-        prompt = self._build_strategy_prompt(target_name, target_gene, target_uniprot,
-                                              report_text, user_query, prior_knowledge)
 
-        # 最多重试3次, 每次打印失败原因
-        for attempt in range(3):
-            strategies, raw_json = self._call_llm(prompt, target_name, target_gene, vector_db_path)
-            if strategies and len(strategies) >= 3:
-                return {"strategies": strategies, "generation_rationale": f"成功生成{len(strategies)}个策略 (第{attempt+1}次调用)"}
-            print(f"\n⚠️ 策略生成第{attempt+1}次: {len(strategies) if strategies else 0}个策略。原始响应{len(raw_json)}字符", flush=True)
-            if raw_json:
-                print(f"  响应结尾: {raw_json[-300:]}", flush=True)
+        # 构建一次共享上下文（metrics + constraints），复用给每次单策略调用
+        metrics_block = self._build_metrics_block(report_text)
+        pdbs_in_report = re.findall(r'\b[0-9][A-Z0-9]{3}\b', report_text[:2000])
+        pdb_note = ""
+        if pdbs_in_report:
+            unique_pdbs = list(dict.fromkeys(pdbs_in_report))[:8]
+            pdb_note = f"\n⚠️ 已有PDB: {', '.join(unique_pdbs)}。禁止说'无实验结构'!\n"
 
-        # 3次都失败: 简化prompt再试
-        simple_prompt = f"""为靶点{target_name}({target_gene})设计5个虚拟筛选策略。输出JSON。
-必须遵守以下不可变执行上下文，不得替换 screening_library 或 target_structure：
-{prior_knowledge[:2000]}"""
+        constraint_block = ""
+        if user_query:
+            constraint_block = f"""## 🚨 用户约束
+{user_query}
+❌ 禁止忽略用户库/口袋/数值约束
+---
+"""
+
+        prior_block = ""
+        if prior_knowledge and prior_knowledge.strip():
+            prior_block = f"""## 🧠 先验知识
+{prior_knowledge.strip()}
+---
+"""
+
+        # ============================================================
+        # 逐策略独立生成：每个策略独占完整 8K token 配额，杜绝截断
+        # 目标 8-10 个，每个 2 次重试机会，已生成策略作为差异化上下文
+        # ============================================================
+        from time import sleep as _sleep
+        TARGET_COUNT = 8
+        MIN_SUCCESS = 3
+        strategies: list[dict] = []
+        existing_summaries: list[str] = []
+
+        for idx in range(TARGET_COUNT):
+            single_prompt = self._build_single_strategy_prompt(
+                target_name, target_gene, target_uniprot,
+                report_text, metrics_block, pdb_note,
+                constraint_block, prior_block,
+                existing_summaries=existing_summaries,
+                strategy_index=idx + 1,
+            )
+            generated = False
+            for attempt in range(2):
+                if attempt > 0:
+                    _sleep(2)
+                result, raw = self._call_llm(single_prompt, target_name, target_gene, vector_db_path)
+                if result and len(result) >= 1:
+                    strategies.append(result[0])
+                    existing_summaries.append(self._summarize_strategy(result[0]))
+                    generated = True
+                    print(f"  ✅ 策略{idx+1}: {result[0].get('strategy_name','?')} [{result[0].get('approach_category','?')}]", flush=True)
+                    break
+                if raw:
+                    print(f"  ⚠️ 策略{idx+1}第{attempt+1}次失败 (raw={len(raw)}chars)", flush=True)
+            if not generated:
+                print(f"  ❌ 策略{idx+1} 2次都失败，跳过", flush=True)
+
+        # 不足时回退批量模式兜底（prompt 要求 4-6 个）
+        if len(strategies) < MIN_SUCCESS:
+            print(f"\n⚠️ 单策略仅产出{len(strategies)}个, 回退批量模式...", flush=True)
+            _sleep(2)
+            batch_prompt = self._build_strategy_prompt(
+                target_name, target_gene, target_uniprot,
+                report_text, user_query, prior_knowledge,
+            )
+            for attempt in range(2):
+                if attempt > 0:
+                    _sleep(4)
+                batch_strategies, _ = self._call_llm(batch_prompt, target_name, target_gene, vector_db_path)
+                if batch_strategies and len(batch_strategies) >= MIN_SUCCESS:
+                    existing_names = {s.get("strategy_name", "") for s in strategies}
+                    for s in batch_strategies:
+                        if s.get("strategy_name", "") not in existing_names:
+                            strategies.append(s)
+                    break
+
+        if len(strategies) >= MIN_SUCCESS:
+            return {"strategies": strategies,
+                    "generation_rationale": f"成功生成{len(strategies)}个策略 (逐策略独立生成, 各占独立token配额)"}
+
+        # 简化 prompt 最后尝试
+        _sleep(4)
+        simple_prompt = f"""为{target_name}({target_gene})设计3个虚拟筛选策略。输出JSON。
+不可变上下文: {prior_knowledge[:2000]}"""
         strategies, _ = self._call_llm(simple_prompt, target_name, target_gene, vector_db_path)
-        if strategies and len(strategies) >= 3:
+        if strategies and len(strategies) >= MIN_SUCCESS:
             return {"strategies": strategies, "generation_rationale": "简化prompt重试成功"}
 
+        # 兜底：确定性模板
+        print(f"\n⚠️ 所有LLM调用失败, 使用确定性模板。", flush=True)
+        fallback_result = self._fallback(target_name, target_gene)
+        if fallback_result.get("strategies"):
+            return {"strategies": fallback_result["strategies"],
+                    "generation_rationale": "确定性模板(LLM不可用)"}
+
         raise RuntimeError(
-            f"策略生成失败: 4次LLM调用均返回<3个有效策略。"
-            f"请检查调研报告是否完整, 或运行 autovs doctor 查看环境状态。"
+            f"策略生成失败: 所有尝试均未产出>={MIN_SUCCESS}个有效策略。"
+            f"请运行 autovs doctor 检查环境。"
         )
 
     def _build_strategy_prompt(self, target_name, target_gene, target_uniprot, report_text, user_query="", prior_knowledge=""):
@@ -203,7 +276,7 @@ class StrategyGeneratorAgent:
 
 """
 
-        return f"""为靶点 {target_name} ({target_gene}, UniProt:{target_uniprot}) 设计8-10个虚拟筛选策略。
+        return f"""为靶点 {target_name} ({target_gene}, UniProt:{target_uniprot}) 设计4-6个虚拟筛选策略。
 
 {constraint_block}{prior_block}{metrics_block}{pdb_note}
 ## 调研报告全文
@@ -289,8 +362,101 @@ report_generation
   }}]
 }}
 
-输出纯JSON, 所有字符串用双引号, 不要markdown代码块。必须输出8-10个差异化策略!"""
+输出纯JSON, 所有字符串用双引号, 不要markdown代码块。必须输出4-6个差异化策略!
 
+🚨 requires 字段是字符串数组，填前置资源描述如 "compound_library"、"protein_structure"，绝对禁止填步骤编号数字！"""
+
+    def _build_single_strategy_prompt(
+        self, target_name, target_gene, target_uniprot,
+        report_text, metrics_block, pdb_note,
+        constraint_block, prior_block,
+        existing_summaries=None, strategy_index=1,
+    ):
+        """构建单策略 prompt — LLM 只需输出 1 个完整策略，独占 8K token 配额。"""
+        existing_note = ""
+        if existing_summaries:
+            items = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(existing_summaries))
+            existing_note = f"""## ⚠️ 已生成策略（必须差异化！）
+{items}
+
+你的新策略必须与以上 {len(existing_summaries)} 个已有策略**明显不同**：不同 approach_category、不同 pipeline 流程、不同风险偏好!
+"""
+        return f"""为靶点 {target_name} ({target_gene}, UniProt:{target_uniprot}) 设计第{strategy_index}个虚拟筛选策略。只需输出 1 个完整策略对象，不要 strategies 数组。
+
+{constraint_block}{prior_block}{existing_note}{metrics_block}{pdb_note}
+## 调研报告参考
+{report_text[:4000]}
+
+## 设计要求
+- 基于靶点口袋和已知配体数据，description 简洁 (50-150字), rationale (100-200字)
+- 与已有策略明显差异化：不同方法组合、不同过滤顺序、不同风险偏好
+
+action_type 只能从以下选择: library_preparation, protein_preparation, binding_site_detection, physicochemical_filtering, diversity_selection, molecular_docking, interaction_analysis, admet_filtering, molecular_dynamics, final_ranking, report_generation
+
+## 输出格式（单策略对象，不含 strategies 数组！）
+{{
+  "strategy_name": "名称",
+  "strategy_tagline": "一句话创新点",
+  "approach_category": "方法本质",
+  "rationale": "设计原理(100-200字)",
+  "target_profile": {{
+    "target_class": "PPI / Kinase / GPCR / Protease / other",
+    "pocket_type": "deep_cleft / shallow_groove / flat_ppi / allosteric",
+    "pocket_volume_approx": "small / medium / large",
+    "pocket_polarity": "hydrophobic / mixed / polar",
+    "recommended_mw_range": [250, 600],
+    "recommended_logp_range": [1.0, 5.0],
+    "has_experimental_structure": true,
+    "has_known_active_ligands": true,
+    "rule_category": "Ro5 / bRo5 / custom"
+  }},
+  "pipeline": [{{
+    "step_number": 1,
+    "action_type": "physicochemical_filtering",
+    "action_name": "步骤名",
+    "description": "简洁描述(50-150字)",
+    "input": {{"type": "compound_library", "size": "1M", "format": "SMILES"}},
+    "output": {{"type": "filtered_library", "size": "~500K", "format": "SDF"}},
+    "parameters": {{"mw_range": [250, 600]}},
+    "quality_criteria": "",
+    "cardinality_estimate": "",
+    "computational_cost": "low",
+    "requires": []
+  }}],
+  "survival_estimate": "",
+  "contingency_plan": {{"trigger": "survivors < 10", "actions": []}},
+  "strengths": [],
+  "weaknesses": [],
+  "estimated_runtime_category": "days",
+  "knowledge_dependencies": [],
+  "applicability_conditions": {{
+    "requires_structure": true,
+    "requires_ligands": false,
+    "min_library_size": "100K",
+    "suitable_target_types": []
+  }}
+}}
+
+输出纯JSON，不要 markdown 代码块，不要外层 strategies 数组！只输出一个策略对象。
+
+🚨 requires 字段必须填描述性字符串，绝对禁止填数字！
+✅ "requires": ["compound_library_smiles"]
+✅ "requires": ["protein_structure", "binding_site_definition"]
+✅ "requires": []
+❌ "requires": [1, 2, 3]
+❌ "requires": [{{"step": 2}}]
+requires 是前置资源描述，不是步骤编号！"""
+
+    @staticmethod
+    def _summarize_strategy(strategy: dict) -> str:
+        """提取策略摘要，用于后续策略差异化提示。"""
+        name = strategy.get("strategy_name", "?")
+        tagline = strategy.get("strategy_tagline", "")
+        category = strategy.get("approach_category", "")
+        steps = [s.get("action_type", "?") for s in strategy.get("pipeline", [])]
+        flow = " → ".join(steps[:6])
+        strengths = ", ".join(strategy.get("strengths", [])[:2])
+        return f"[{category}] {name}: {tagline} | {flow} | {strengths}"
 
     @staticmethod
     def _build_metrics_block(report_text: str) -> str:
@@ -430,6 +596,24 @@ report_generation
             result = []
             fail_count = 0
             for i, item in enumerate(items):
+                # 归一化 requires 字段：LLM 常错误输出整数或对象，统一转为字符串
+                for step in item.get("pipeline", []):
+                    raw_req = step.get("requires", [])
+                    if raw_req:
+                        step["requires"] = [
+                            str(r.get("step", r)) if isinstance(r, dict) else
+                            f"step_{r}" if isinstance(r, (int, float)) else str(r)
+                            for r in raw_req
+                        ]
+                    # 归一化 input/output 的 type/format 字段：LLM 有时输出列表而非字符串
+                    for field_name in ("input", "output"):
+                        field = step.get(field_name, {})
+                        for key in ("type", "format"):
+                            val = field.get(key)
+                            if isinstance(val, list):
+                                field[key] = ", ".join(str(v) for v in val)
+                            elif isinstance(val, (int, float)):
+                                field[key] = str(val)
                 try:
                     s = DetailedStrategy(**item)
                     result.append(s.model_dump())

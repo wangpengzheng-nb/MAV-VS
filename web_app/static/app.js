@@ -17,6 +17,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('refreshTasks').addEventListener('click', loadRecentTasks);
   document.getElementById('copyTaskId').addEventListener('click', copyTaskId);
   document.getElementById('resumeBtn').addEventListener('click', resumeCurrentTask);
+  document.getElementById('cancelBtn').addEventListener('click', cancelCurrentTask);
+  document.getElementById('pauseBtn').addEventListener('click', pauseCurrentTask);
   document.querySelectorAll('.output-tab').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
   updateQueryCount();
   updateDefaultLibraryNotice();
@@ -62,22 +64,56 @@ async function loadRecentTasks() {
       <button class="recent-task status-${escapeHtml(task.status)} ${task.task_id === currentTaskId ? 'active' : ''}" type="button" data-task-id="${escapeHtml(task.task_id)}">
         <i></i><span class="recent-copy"><strong>${escapeHtml(task.query || '未命名筛选任务')}</strong><small>${escapeHtml(task.task_id)}</small></span>
         <time>${escapeHtml(shortTime(task.updated_at))}</time>
+        ${TERMINAL.has(task.status) ? `<span class="recent-task-delete" title="永久删除" data-delete-id="${escapeHtml(task.task_id)}">×</span>` : ''}
       </button>`).join('');
     container.querySelectorAll('.recent-task').forEach(button => button.addEventListener('click', () => openTask(button.dataset.taskId)));
+    container.querySelectorAll('.recent-task-delete').forEach(btn => btn.addEventListener('click', event => {
+      event.stopPropagation();
+      deleteRecentTask(btn.dataset.deleteId);
+    }));
   } catch (error) {
     container.innerHTML = `<p class="muted-empty">${escapeHtml(error.message)}</p>`;
   }
 }
 
+async function deleteRecentTask(taskId) {
+  if (!confirm(`确定要永久删除任务 ${taskId} 及其所有关联文件吗？此操作不可撤销。`)) return;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}?permanent=true`, {method: 'DELETE'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '删除失败');
+    showToast(`任务 ${taskId} 已永久删除`);
+    // 如果正在查看被删除的任务，清空工作区
+    if (currentTaskId === taskId) {
+      disconnectProgress();
+      currentTaskId = null;
+      lastTask = null;
+      selectedPhaseId = null;
+      localStorage.removeItem('autovs.activeTaskId');
+      document.getElementById('emptyState').hidden = false;
+      document.getElementById('taskWorkspace').hidden = true;
+    }
+    loadRecentTasks();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
 async function startPipeline(event) {
   event.preventDefault();
-  const query = document.getElementById('queryInput').value.trim();
+  const targetGene = document.getElementById('targetGeneInput').value.trim();
+  const requirements = document.getElementById('queryInput').value.trim();
+  const query = `靶点基因: ${targetGene}。${requirements}`;
   const protein = document.getElementById('proteinInput').files[0];
   const library = document.getElementById('libraryInput').files[0];
   const errorBox = document.getElementById('formError');
   errorBox.hidden = true;
-  if (query.length < 10) {
-    showFormError('请填写至少 10 个字符的自然语言筛选目标。蛋白和分子库均为可选。');
+  if (!targetGene || targetGene.length < 1) {
+    showFormError('请填写靶点基因英文缩写（如 PTGER2、EP2、BCL2）。');
+    return;
+  }
+  if (requirements.length < 5) {
+    showFormError('请至少填写 5 个字符的筛选要求。');
     return;
   }
   if (protein && !protein.name.toLowerCase().endsWith('.pdb')) {
@@ -94,6 +130,7 @@ async function startPipeline(event) {
   }
   const form = new FormData();
   form.append('query', query);
+  form.append('target_gene', targetGene);
   if (protein) form.append('protein', protein);
   if (library) form.append('library', library);
   form.append('center', document.getElementById('centerInput').value.trim());
@@ -224,7 +261,9 @@ function renderSnapshot(snapshot) {
   const status = document.getElementById('taskStatus');
   status.textContent = statusLabel(snapshot.status).toUpperCase();
   status.className = `status-pill ${snapshot.status}`;
-  document.getElementById('resumeBtn').hidden = !['failed', 'cancelled'].includes(snapshot.status);
+  document.getElementById('resumeBtn').hidden = !['failed', 'cancelled', 'paused'].includes(snapshot.status);
+  document.getElementById('cancelBtn').hidden = ['succeeded', 'failed', 'cancelled', 'paused'].includes(snapshot.status);
+  document.getElementById('pauseBtn').hidden = snapshot.status !== 'running';
   document.getElementById('percentText').textContent = `${snapshot.percent || 0}%`;
   document.getElementById('meterFill').style.width = `${Math.max(0, Math.min(100, snapshot.percent || 0))}%`;
   document.querySelector('.meter-track').classList.toggle('running', snapshot.status === 'running');
@@ -261,9 +300,13 @@ async function showPhase(phase) {
   selectedPhaseId = phase.phase_id;
   document.querySelectorAll('.phase-row').forEach(row => row.classList.toggle('selected', row.dataset.phaseId === selectedPhaseId));
   const container = document.getElementById('diagnosticContent');
-  container.innerHTML = renderPhaseSummary(phase, true);
   const jobId = phase.metadata?.job_id;
-  if (!jobId || !currentTaskId) return;
+  if (!jobId || !currentTaskId) {
+    // 规划阶段(调研/策略/投票等)没有job_id, 直接显示摘要, 不请求诊断
+    container.innerHTML = renderPhaseSummary(phase, false);
+    return;
+  }
+  container.innerHTML = renderPhaseSummary(phase, true);
   try {
     const response = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/jobs/${encodeURIComponent(jobId)}/diagnostics`);
     if (!response.ok) throw new Error('无法读取该工具步骤的诊断数据');
@@ -275,12 +318,13 @@ async function showPhase(phase) {
 }
 
 function renderPhaseSummary(phase, loading = false) {
-  const taskArtifacts = (lastTask?.artifacts || []).filter(item => !item.job_id && /error|failure/i.test(item.name));
+  // 展示所有任务级产物（无 job_id），方便用户随时下载中间文件
+  const taskArtifacts = (lastTask?.artifacts || []).filter(item => !item.job_id);
   return `
     <div class="diagnostic-head"><span class="diag-status ${escapeHtml(phase.status)}">${escapeHtml(statusLabel(phase.status))}</span><h4>${escapeHtml(phase.label)}</h4><p>${escapeHtml(phase.message || '该阶段尚未产生执行消息。')}</p></div>
     ${phase.error ? `<div class="error-block">${escapeHtml(phase.error)}</div>` : ''}
     <dl class="diag-meta"><dt>阶段 ID</dt><dd>${escapeHtml(phase.phase_id)}</dd><dt>更新时间</dt><dd>${escapeHtml(formatDate(phase.updated_at))}</dd>${phase.metadata?.step_id ? `<dt>工具步骤</dt><dd>${escapeHtml(phase.metadata.step_id)}</dd>` : ''}</dl>
-    ${taskArtifacts.length ? `<div class="diag-links">${taskArtifacts.map(artifactLink).join('')}</div>` : ''}
+    ${taskArtifacts.length ? `<div class="diag-links"><h5>📥 可下载中间产物</h5>${taskArtifacts.map(artifactLink).join('')}</div>` : ''}
     ${loading ? '<p class="muted-empty">正在读取工具日志…</p>' : ''}`;
 }
 
@@ -337,6 +381,44 @@ function renderArtifacts(taskId, artifacts) {
     <article class="artifact-card"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${escapeHtml(item.format)} · ${escapeHtml(formatBytes(item.size_bytes))}</small><a href="/api/tasks/${encodeURIComponent(taskId)}/artifacts/${item.artifact_id}">下载并检查</a></article>`).join('')}</div>`;
 }
 
+async function cancelCurrentTask() {
+  if (!currentTaskId) return;
+  if (!confirm('确定要取消这个任务吗？正在运行的工具步骤将被终止。')) return;
+  const button = document.getElementById('cancelBtn');
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}`, {method: 'DELETE'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '无法取消任务');
+    showToast('任务已取消');
+    await refreshCurrentTask();
+    loadRecentTasks();
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function pauseCurrentTask() {
+  if (!currentTaskId) return;
+  if (!confirm('确定要暂停该任务吗？已完成阶段将保留，可在修改代码后从断点继续运行。')) return;
+  const button = document.getElementById('pauseBtn');
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/pause`, {method: 'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '无法暂停任务');
+    showToast('已发出暂停信号，任务将在当前阶段完成后暂停');
+    await refreshCurrentTask();
+    loadRecentTasks();
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function resumeCurrentTask() {
   if (!currentTaskId) return;
   const button = document.getElementById('resumeBtn');
@@ -376,7 +458,7 @@ async function copyTaskId() {
 }
 
 function updateQueryCount() {
-  document.getElementById('queryCount').textContent = `${document.getElementById('queryInput').value.length} / 5000`;
+  document.getElementById('queryCount').textContent = `${document.getElementById('queryInput').value.length} / 3000`;
 }
 function updateFileName(event, targetId) {
   const file = event.target.files[0];
@@ -429,7 +511,7 @@ function phaseIcon(status, index) {
   return String(index).padStart(2, '0');
 }
 function statusLabel(status) {
-  return ({pending: '等待', running: '运行中', succeeded: '已完成', failed: '失败', skipped: '已跳过', quarantined: '已隔离', cancelled: '已取消'})[status] || status || '未知';
+  return ({pending: '等待', running: '运行中', succeeded: '已完成', failed: '失败', skipped: '已跳过', quarantined: '已隔离', cancelled: '已取消', paused: '已暂停'})[status] || status || '未知';
 }
 function formatVector(values) { return Array.isArray(values) ? values.map(value => Number(value).toFixed(2)).join(', ') : '—'; }
 function formatBytes(value) {

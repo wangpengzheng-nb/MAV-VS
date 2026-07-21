@@ -209,6 +209,14 @@ class StateStore:
                 (JobStatus.FAILED.value, error, "该阶段执行失败", utcnow(), task_id, JobStatus.RUNNING.value),
             )
 
+    def cancel_running_progress(self, task_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE progress_events SET status=?, message=?, updated_at=? WHERE task_id=? AND status IN (?,?)",
+                (JobStatus.CANCELLED.value, "任务已取消", utcnow(), task_id,
+                 JobStatus.RUNNING.value, JobStatus.PENDING.value),
+            )
+
     def list_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 100))
         with self.connect() as conn:
@@ -223,3 +231,12 @@ class StateStore:
             item["query"] = request.get("query", "")
             result.append(item)
         return result
+
+    def delete_task(self, task_id: str) -> bool:
+        """永久删除任务及其所有关联数据（jobs/artifacts/progress_events）。返回是否成功删除。"""
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM artifacts WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM jobs WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM progress_events WHERE task_id=?", (task_id,))
+            cursor = conn.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
+            return cursor.rowcount > 0

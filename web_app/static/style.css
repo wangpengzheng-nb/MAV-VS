@@ -124,15 +124,18 @@ textarea:focus, input[type="text"]:focus { border-color: var(--blue); box-shadow
 .recent-heading h2 { margin: 0; font-family: var(--display); font-size: 14px; }
 .recent-heading button { border: 0; background: none; color: var(--blue); cursor: pointer; font-size: 10px; }
 .recent-list { display: grid; gap: 5px; }
-.recent-task { width: 100%; display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 9px 7px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
+.recent-task { width: 100%; display: grid; grid-template-columns: 8px minmax(0,1fr) auto auto; align-items: center; gap: 10px; padding: 9px 7px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
 .recent-task:hover, .recent-task.active { background: #e7f0f3; }
 .recent-task > i { width: 6px; height: 6px; border-radius: 50%; background: #a8b5b9; }
 .recent-task.status-running > i { background: var(--blue); box-shadow: 0 0 0 4px rgba(23,107,135,.1); }
 .recent-task.status-succeeded > i { background: var(--success); }
 .recent-task.status-failed > i { background: var(--danger); }
+.recent-task.status-paused > i { background: #e6a817; animation: pulse-dot 1.5s ease-in-out infinite; }
 .recent-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .recent-copy strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .recent-copy small, .recent-task time { color: var(--muted); font-family: var(--mono); font-size: 8px; }
+.recent-task-delete { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin-left: 6px; border-radius: 4px; color: var(--muted); font-size: 14px; font-weight: 700; line-height: 1; cursor: pointer; transition: color .15s, background .15s; flex-shrink: 0; }
+.recent-task-delete:hover { color: #fff; background: var(--danger); }
 .muted-empty { margin: 16px 0; color: var(--muted); font-size: 11px; }
 
 .empty-state { min-height: calc(100vh - 170px); max-width: 660px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }

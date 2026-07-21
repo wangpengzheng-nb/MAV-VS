@@ -1345,12 +1345,31 @@ class TargetScoutAgent:
                 chembl_activities=chembl_activities, pubmed_papers=pubmed_papers,
                 clinical_trials=clinical_trials,
             )
-            # 将拼装文本填入各字段(供test_tournament显示)
-            ft = report["full_report_text"]
-            report["biology_overview"] = ft
-            report["structural_analysis"] = ""
-            report["druggability_assessment"] = ""
-            report["known_ligands_text"] = ""
+            # 将API数据拆分填入各章节 (供策略生成器使用, 即使LLM全部失败也能工作)
+            report["biology_overview"] = self._build_api_fallback(
+                target_name=gene_symbol or gene or "Unknown",
+                uniprot_data=uniprot_data, verified_pdbs=None,
+                chembl_activities=None, pubmed_papers=pubmed_papers,
+                clinical_trials=None,
+            )
+            report["structural_analysis"] = self._build_api_fallback(
+                target_name=gene_symbol or gene or "Unknown",
+                uniprot_data=None, verified_pdbs=verified_pdbs,
+                chembl_activities=None, pubmed_papers=None,
+                clinical_trials=None,
+            )
+            report["known_ligands_text"] = self._build_api_fallback(
+                target_name=gene_symbol or gene or "Unknown",
+                uniprot_data=None, verified_pdbs=None,
+                chembl_activities=chembl_activities, pubmed_papers=None,
+                clinical_trials=None,
+            )
+            report["druggability_assessment"] = self._build_api_fallback(
+                target_name=gene_symbol or gene or "Unknown",
+                uniprot_data=None, verified_pdbs=None,
+                chembl_activities=None, pubmed_papers=None,
+                clinical_trials=clinical_trials,
+            )
         report["_search_log"] = log
 
         # ── 🆕 Step 7: 写入向量数据库 + 生成执行摘要 ──
@@ -1613,57 +1632,67 @@ class TargetScoutAgent:
         每段只需输出纯Markdown文本(无JSON开销), token预算充足。
         单段失败不影响其他段, 最终汇总验证。
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         is_reasoner = "reasoner" in self.model.lower()
         results: Dict[str, str] = {}
 
         def _call_section(cfg: dict) -> tuple:
-            """单章节LLM调用。返回 (field_name, text_content, error_msg)。"""
+            """单章节LLM调用(含2次重试)。返回 (field_name, text_content, error_msg)。"""
+            from time import sleep as _sleep
             field = cfg["field"]
-            try:
-                msgs = [
-                    {"role": "system", "content": cfg["system_prompt"]},
-                    {"role": "user", "content": user_prompt},
-                    {"role": "system", "content": (
-                        f"请只输出 '{cfg['title']}' 章节的纯Markdown文本。"
-                        f"以 '## {cfg['section_num']}. {cfg['title']}' 开头。"
-                        f"约{cfg['min_chars']}-{cfg['max_chars']}字。不要输出JSON,不要输出其他章节。"
-                        f"防幻觉: 不捏造数值, API无数据则诚实说明。"
-                    )},
-                ]
-                api_kwargs = dict(
-                    model=self.model, max_tokens=self.max_tokens,
-                    messages=msgs,
-                )
-                if not is_reasoner:
-                    api_kwargs["temperature"] = self.temperature
-                resp = self.client.chat.completions.create(**api_kwargs)
-                raw = resp.choices[0].message.content or ""
-                finish = getattr(resp.choices[0], "finish_reason", "stop")
-                if finish == "length":
-                    print(f"  ⚠️ [{field}] 输出被截断(finish_reason=length)", flush=True)
-                # 清洗输出: 去掉可能的markdown代码块标记
-                raw = raw.strip()
-                if raw.startswith("```"):
-                    raw = re.sub(r'^```\w*\n?', '', raw)
-                    raw = re.sub(r'\n?```$', '', raw)
-                if len(raw) < 100:
-                    return (field, "", f"输出过短({len(raw)}字符)")
-                print(f"  ✅ [{field}] {len(raw)} chars (finish={finish})", flush=True)
-                return (field, raw, "")
-            except Exception as e:
-                return (field, "", str(e))
+            last_err = ""
+            for attempt in range(3):
+                try:
+                    msgs = [
+                        {"role": "system", "content": cfg["system_prompt"]},
+                        {"role": "user", "content": user_prompt},
+                        {"role": "system", "content": (
+                            f"请只输出 '{cfg['title']}' 章节的纯Markdown文本。"
+                            f"以 '## {cfg['section_num']}. {cfg['title']}' 开头。"
+                            f"约{cfg['min_chars']}-{cfg['max_chars']}字。不要输出JSON,不要输出其他章节。"
+                            f"防幻觉: 不捏造数值, API无数据则诚实说明。"
+                        )},
+                    ]
+                    api_kwargs = dict(
+                        model=self.model, max_tokens=self.max_tokens,
+                        messages=msgs,
+                    )
+                    if not is_reasoner:
+                        api_kwargs["temperature"] = self.temperature
+                    resp = self.client.chat.completions.create(**api_kwargs)
+                    raw = resp.choices[0].message.content or ""
+                    finish = getattr(resp.choices[0], "finish_reason", "stop")
+                    if finish == "length":
+                        print(f"  ⚠️ [{field}] 输出被截断(finish_reason=length)", flush=True)
+                    # 清洗输出: 去掉可能的markdown代码块标记
+                    raw = raw.strip()
+                    if raw.startswith("```"):
+                        raw = re.sub(r'^```\w*\n?', '', raw)
+                        raw = re.sub(r'\n?```$', '', raw)
+                    if len(raw) < 100:
+                        last_err = f"输出过短({len(raw)}字符)"
+                        if attempt < 2:
+                            _sleep(1.5 * (attempt + 1))
+                            continue
+                        return (field, "", last_err)
+                    print(f"  ✅ [{field}] {len(raw)} chars (finish={finish})", flush=True)
+                    return (field, raw, "")
+                except Exception as e:
+                    last_err = str(e)
+                    if attempt < 2:
+                        _sleep(1.5 * (attempt + 1))
+                        continue
+            return (field, "", last_err)
 
-        # 并行调用4个章节
-        print(f"\n📝 多段并行生成报告 (4个独立LLM调用)...", flush=True)
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(_call_section, cfg): cfg for cfg in SECTION_CONFIGS}
-            for future in as_completed(futures):
-                field, text, err = future.result()
-                if err:
-                    print(f"  ❌ [{field}] 失败: {err}", flush=True)
-                results[field] = text
+        # 串行调用4个章节 (避免DeepSeek免费API速率限制)
+        print(f"\n📝 串行生成报告 (4个独立LLM调用, 间隔3s以避免速率限制)...", flush=True)
+        for i, cfg in enumerate(SECTION_CONFIGS):
+            if i > 0:
+                from time import sleep as _sleep2
+                _sleep2(3)  # 调用间隔3秒, 避开速率限制
+            field, text, err = _call_section(cfg)
+            if err:
+                print(f"  ❌ [{field}] 失败: {err}", flush=True)
+            results[field] = text
 
         # 组装报告 — 从user_prompt提取靶点名称, 避免Unknown Target
         m = re.search(r'基因/靶点:\s*(\S+)', user_prompt)
@@ -1801,15 +1830,55 @@ class TargetScoutAgent:
                 if not is_reasoner: kwargs2.update(temperature=0.0, response_format={"type":"json_object"})
                 resp2 = self.client.chat.completions.create(**kwargs2)
                 parsed = json.loads(resp2.choices[0].message.content.strip())
+            # 后校验: LLM返回空基因或无法识别的靶点名时, 回退到启发式
+            gene = (parsed.get("target_name") or "").strip()
+            org = (parsed.get("organism") or "").strip()
+            if not gene or gene in ("?", "unknown", "Unknown", "None", "null", ""):
+                parsed = self._heuristic_parse_intent(query)
+            elif org in ("?", "unknown", ""):
+                # 物种未知但基因有效时, 药物筛选默认人类
+                parsed["organism"] = "Homo sapiens"
             return parsed
         except Exception:
-            # 启发式: 提取英文基因符号 (≥2大写字母)
-            m = re.search(r'\b([A-Z]{2,}[0-9]*[A-Za-z]*)\b', query)
-            gene = m.group(1) if m else ""
-            cn_map = {"雄激素受体":"AR","雌激素受体":"ESR1","BCL-2":"BCL2","EGFR":"EGFR","KRAS":"KRAS"}
-            for cn, en in cn_map.items():
-                if cn in query: gene = en; break
-            return {"target_name":gene,"uniprot_id":"","target_class":"","is_viral":False,"is_pathogen":False,"organism":""}
+            return self._heuristic_parse_intent(query)
+
+    @staticmethod
+    def _heuristic_parse_intent(query: str) -> Dict[str, Any]:
+        """纯Python启发式意图解析: 不依赖LLM, 用于LLM失败或返回空值的兜底。
+
+        Python3中\\b对中文字符不生效(中文也是\\w), 改用直接搜索大写字母串
+        配合中文常见靶点名映射表。
+        """
+        import re as _re
+        gene = ""
+        # 1) 先用中文常见靶点名映射
+        cn_map = {
+            "雄激素受体":"AR", "雌激素受体":"ESR1", "BCL-2":"BCL2", "BCL-xl":"BCL2L1",
+            "EGFR":"EGFR", "KRAS":"KRAS", "BRAF":"BRAF", "ALK":"ALK", "ROS1":"ROS1",
+            "MET":"MET", "RET":"RET", "NTRK":"NTRK", "HER2":"ERBB2", "PD-L1":"CD274",
+            "前列腺素E2受体EP2":"PTGER2", "前列腺素E2受体":"PTGER2",
+            "EP2受体":"PTGER2", "EP4受体":"PTGER4", "COX-2":"PTGS2", "COX2":"PTGS2",
+            "TNF":"TNF", "TNF-α":"TNF", "IL-6":"IL6", "IL6":"IL6",
+            "p53":"TP53", "TP53":"TP53", "MDM2":"MDM2", "BCL2":"BCL2",
+            "VEGF":"VEGFA", "PD-1":"PDCD1", "PD1":"PDCD1", "CTLA-4":"CTLA4",
+            "mTOR":"MTOR", "PI3K":"PIK3CA", "AKT":"AKT1", "STAT3":"STAT3",
+            "NF-κB":"NFKB1", "NFkB":"NFKB1", "JAK":"JAK1", "CDK4":"CDK4",
+            "CDK6":"CDK6", "PARP":"PARP1", "HDAC":"HDAC1", "SGLT2":"SLC5A2",
+        }
+        for cn, en in cn_map.items():
+            if cn.lower() in query.lower():
+                gene = en; break
+        # 2) 中文映射未命中则直接提取所有大写字母序列, 过滤常见非基因词
+        if not gene:
+            candidates = _re.findall(r'[A-Z]{2,}[0-9]*[A-Za-z]*', query)
+            noise = {"PROTAC", "SMILES", "PDB", "JSON", "API", "IC50", "MW",
+                     "LOGP", "HPLC", "NMR", "ATP", "DNA", "RNA", "FDA", "EMA",
+                     "ADMET", "ADME", "SBDD", "LBDD", "FEP", "MD", "VS", "HTVS",
+                     "SPA", "API", "HTTP", "URL", "CSV", "TSV", "SDF", "PDBQT"}
+            for c in candidates:
+                if c not in noise and len(c) >= 2:
+                    gene = c; break
+        return {"target_name":gene,"uniprot_id":"","target_class":"","is_viral":False,"is_pathogen":False,"organism":""}
 
     @staticmethod
     def _parse_organism_specific_gene(query: str, organism: str) -> str:

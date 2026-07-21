@@ -3,11 +3,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from dotenv import load_dotenv
+
+# 加载项目根目录的 .env 文件 (server.py 从 web_app/ 启动时, 需指向上级目录)
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(_ENV_PATH)
+
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -31,10 +39,8 @@ async def cache_policy(request: Request, call_next):
     if path == "/" or path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
     elif path.startswith("/static/"):
-        if request.query_params.get("v"):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        else:
-            response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+        # 版本化静态资源允许短期缓存
+        response.headers["Cache-Control"] = "public, max-age=300"
     return response
 
 
@@ -63,13 +69,23 @@ def list_tasks(limit: int = 20):
 
 @app.post("/api/tasks")
 async def create_task(
-    query: str = Form(...), protein: UploadFile | None = File(None), library: UploadFile | None = File(None),
+    request: Request,
+    query: str = Form(...),
+    target_gene: str = Form(""),
     center: str = Form(""), size: str = Form("24,24,24"), key_residues: str = Form(""),
     ligand_id: str = Form(""),
     ph: float = Form(7.4), cpu_only: bool = Form(False), baseline: bool = Form(False),
 ):
+    # 兼容前端拆分输入：如前端传了 target_gene 且 query 未含前缀，自动拼接
+    if target_gene.strip() and not query.startswith("靶点基因:"):
+        query = f"靶点基因: {target_gene.strip()}。{query.strip()}"
     if len(query.strip()) < 10:
         raise HTTPException(400, "任务描述至少10个字符")
+    # 手动从 multipart form 中提取可选文件字段，
+    # 避免 FastAPI File(None) 在某些版本/环境下将缺失字段误报为必填。
+    raw_form = await request.form()
+    protein = raw_form.get("protein")
+    library = raw_form.get("library")
     if baseline and protein is None:
         raise HTTPException(422, "基础链路诊断模式必须上传预处理后的 PDB 文件")
     upload_dir = Path(tempfile.mkdtemp(prefix="autovs_upload_", dir=service.settings.task_root))
@@ -157,6 +173,21 @@ def job_diagnostics(task_id: str, job_id: str):
     return {"job": job, "artifacts": artifacts, "snippets": snippets}
 
 
+@app.delete("/api/tasks/{task_id}")
+def cancel_task(task_id: str, permanent: bool = False):
+    """取消正在运行或等待中的任务；permanent=true 时永久删除已完成/失败/已取消的任务。"""
+    if permanent:
+        try:
+            result = service.delete_task(task_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return result
+    ok = service.cancel_task(task_id)
+    if not ok:
+        raise HTTPException(409, "任务不存在或已结束，无法取消")
+    return {"task_id": task_id, "status": "cancelled"}
+
+
 @app.post("/api/tasks/{task_id}/resume")
 def resume_task(task_id: str):
     try:
@@ -164,6 +195,15 @@ def resume_task(task_id: str):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"task_id": task_id, "status": "running"}
+
+
+@app.post("/api/tasks/{task_id}/pause")
+def pause_task(task_id: str):
+    """暂停正在运行的任务，保留已完成阶段的成果。"""
+    ok = service.pause_task(task_id)
+    if not ok:
+        raise HTTPException(409, "任务不在运行状态，无法暂停")
+    return {"task_id": task_id, "status": "paused"}
 
 
 @app.get("/api/progress/{task_id}")
