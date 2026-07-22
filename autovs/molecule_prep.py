@@ -15,9 +15,9 @@
 
 from __future__ import annotations
 
-import csv
-import json
 import subprocess
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,32 @@ from typing import Any
 _MAX_PROTOMER_STATES = 4     # 质子化+互变异构
 _MAX_STEREO_STATES = 4       # 手性+顺反异构
 _MAX_CONFORMERS = 3          # 每个状态的初始构象数
+
+
+def _iter_strict_smi(path: Path):
+    with path.open(encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) < 2:
+                parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            mol_id, smiles = parts[0].strip(), parts[1].strip()
+            if mol_id.lower() in {"source_id", "molecule_id", "id"} and smiles.lower() in {"smiles", "smi"}:
+                continue
+            yield mol_id, smiles
+
+
+def _largest_fragment(mol: Any) -> Any:
+    from rdkit import Chem
+
+    fragments = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+    if not fragments:
+        return mol
+    return max(fragments, key=lambda item: (item.GetNumHeavyAtoms(), item.GetNumAtoms()))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -72,18 +98,7 @@ def standardize_molecules(
     rejected: list[dict[str, Any]] = []
 
     with out.open("w", encoding="utf-8") as handle:
-        handle.write("source_id\tsmiles\n")
-        with filepath.open(encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t", 1)
-                if len(parts) < 2:
-                    parts = line.split(None, 1)
-                if len(parts) < 2:
-                    continue
-                mol_id, smiles = parts[0].strip(), parts[1].strip()
+        for mol_id, smiles in _iter_strict_smi(filepath):
                 total += 1
                 try:
                     mol = Chem.MolFromSmiles(smiles)
@@ -104,7 +119,8 @@ def standardize_molecules(
                             rejected.append({"source_id": mol_id, "smiles": smiles,
                                              "reason": "去盐后无有效分子"})
                             continue
-                        if Chem.MolToSmiles(parent) != smiles:
+                        parent = _largest_fragment(parent)
+                        if Chem.MolToSmiles(parent, isomericSmiles=True) != Chem.MolToSmiles(mol, isomericSmiles=True):
                             salt_removed += 1
                         mol = parent
 
@@ -156,20 +172,33 @@ def enumerate_ionization(
     Returns:
         [{source_id, smiles, protonation_site, ...}]
     """
-    from dimorphite_dl import DimorphiteDL
-
-    dimorphite = DimorphiteDL(
-        min_ph=ph_min,
-        max_ph=ph_max,
-        max_variants_per_compound=max_states,
-    )
+    from dimorphite_dl import protonate_smiles
 
     results: list[dict[str, Any]] = []
-    for i, smi in enumerate(input_smiles):
-        variants = dimorphite.protonate(smi)
+    for i, item in enumerate(input_smiles):
+        source_id = f"mol_{i}"
+        smi = item.strip()
+        if not smi:
+            continue
+        parts = smi.split("\t", 1)
+        if len(parts) >= 2:
+            source_id, smi = parts[0].strip(), parts[1].strip()
+        elif " " in smi:
+            maybe_smi, maybe_id = smi.split(None, 1)
+            source_id, smi = maybe_id.strip(), maybe_smi.strip()
+        if source_id.lower() in {"source_id", "molecule_id", "id"} and smi.lower() in {"smiles", "smi"}:
+            continue
+        variants = protonate_smiles(
+            smi, ph_min=ph_min, ph_max=ph_max,
+            max_variants=max_states, label_identifiers=False, label_states=False,
+        )
+        seen: set[str] = set()
         for j, var in enumerate(variants):
+            if var in seen:
+                continue
+            seen.add(var)
             results.append({
-                "source_id": f"mol_{i}",
+                "source_id": source_id,
                 "variant_index": j,
                 "smiles": var,
             })
@@ -211,10 +240,6 @@ def prepare_ligands_3d(
     Returns:
         诊断报告
     """
-    import gypsum_dl.Start as gdl
-    import gypsum_dl.Parallelizer as gpar
-    from gypsum_dl import Utils
-
     filepath = Path(input_path)
     if not filepath.is_file():
         raise FileNotFoundError(f"输入文件不存在: {filepath}")
@@ -222,44 +247,48 @@ def prepare_ligands_3d(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # 构造 Gypsum-DL 参数
-    # Gypsum-DL 通过命令行参数或 JSON 配置运行
-    import tempfile
     import shutil
 
-    # 复制输入到临时工作目录
     work_dir = out.parent
     temp_input = work_dir / "gypsum_input.smi"
-    shutil.copy(filepath, temp_input)
+    with temp_input.open("w", encoding="utf-8") as handle:
+        for mol_id, smiles in _iter_strict_smi(filepath):
+            handle.write(f"{smiles} {mol_id}\n")
 
-    # 使用 subprocess 调用 gypsum_dl（更可靠）
-    gypsum_cmd = [
-        "python3", "-m", "gypsum_dl",
-        "--source", str(temp_input),
-        "--output_folder", str(work_dir),
-        "--job_manager", job_manager,
-        "--num_processors", str(num_processes if num_processes > 0 else 1),
-        "--max_variants_per_compound", str(max_variants_per_compound),
-        "--thoroughness", "0",  # 0=快速, 1=中等, 2=彻底
-        "--separate_output_files", "False",
-        "--add_pdb_output", "False",
-        "--2d_output_only", "False",
-        "--skip_optimize_geometry", str(skip_optimize_geometry),
-        "--skip_alternate_ring_conformations", str(skip_alternate_ring_conformations),
-        "--let_tautomers_change_chirality", str(let_tautomers_change_chirality),
-        "--min_ph", str(ph),
-        "--max_ph", str(ph),
-    ]
+    from gypsum_dl.run import prepare_molecules
 
-    result = subprocess.run(
-        gypsum_cmd,
-        cwd=work_dir,
-        capture_output=True, text=True,
-        timeout=3600,
-    )
+    args = {
+        "source": str(temp_input),
+        "output_folder": str(work_dir),
+        "job_manager": "serial" if job_manager == "multiprocessing" and num_processes in {-1, 1} else job_manager,
+        "num_processors": num_processes if num_processes > 0 else 1,
+        "max_variants_per_compound": max(1, max_variants_per_compound),
+        "thoroughness": 1,
+        "separate_output_files": False,
+        "add_pdb_output": False,
+        "add_html_output": False,
+        "2d_output_only": False,
+        "skip_optimize_geometry": skip_optimize_geometry,
+        "skip_alternate_ring_conformations": skip_alternate_ring_conformations,
+        "let_tautomers_change_chirality": let_tautomers_change_chirality,
+        "min_ph": ph,
+        "max_ph": ph,
+    }
 
-    # Gypsum-DL 输出到 source 文件所在目录
-    output_sdf = work_dir / f"{temp_input.stem}_output.sdf"
+    returncode = 0
+    stderr_tail = ""
+    stdout_tail = ""
+    try:
+        stdout_buffer, stderr_buffer = StringIO(), StringIO()
+        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+            prepare_molecules(args)
+        stdout_tail = stdout_buffer.getvalue()[-1000:]
+        stderr_tail = stderr_buffer.getvalue()[-500:]
+    except Exception as exc:
+        returncode = 1
+        stderr_tail = str(exc)[-500:]
+
+    output_sdf = work_dir / "gypsum_dl_success.sdf"
     if output_sdf.is_file():
         shutil.copy(output_sdf, out)
 
@@ -269,9 +298,13 @@ def prepare_ligands_3d(
         "max_stereo": max_stereo_states,
         "max_conformers": max_conformers,
         "output_sdf": str(out) if out.is_file() else None,
-        "returncode": result.returncode,
-        "stderr_tail": result.stderr[-500:] if result.stderr else "",
+        "variant_count": _count_records(out, "sdf"),
+        "returncode": returncode,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
     }
+    if returncode or not out.is_file():
+        raise RuntimeError(f"Gypsum-DL failed to produce SDF: {stderr_tail or 'output missing'}")
     return report
 
 
@@ -315,9 +348,8 @@ def prepare_pdbqt(
     out = Path(output_pdbqt)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    preparator = MoleculePreparation(
-        merge_these_hydrogens=merge_these_hydrogens,
-    )
+    merge_types = ("H",) if merge_these_hydrogens else ()
+    preparator = MoleculePreparation(merge_these_atom_types=merge_types)
 
     suppliers = Chem.SDMolSupplier(str(sdf_path), removeHs=not add_hydrogens)
     total, success = 0, 0
@@ -329,12 +361,17 @@ def prepare_pdbqt(
             total += 1
             try:
                 mol = Chem.AddHs(mol, addCoords=True) if add_hydrogens else mol
-                setup = preparator.prepare(mol)
-                pdbqt_string, _ = PDBQTWriterLegacy.write_string(setup)
-                if pdbqt_string:
-                    handle.write(pdbqt_string)
-                    handle.write("END\n")
-                    success += 1
+                setups = preparator.prepare(mol)
+                if not isinstance(setups, (list, tuple)):
+                    setups = [setups]
+                for setup in setups:
+                    result = PDBQTWriterLegacy.write_string(setup)
+                    pdbqt_string = result[0] if isinstance(result, tuple) else result
+                    if pdbqt_string:
+                        handle.write(pdbqt_string)
+                        if not pdbqt_string.rstrip().endswith("END"):
+                            handle.write("\nEND\n")
+                        success += 1
             except Exception:
                 continue
 
@@ -350,9 +387,6 @@ def prepare_pdbqt(
 # 5. Open Babel — 通用格式转换
 # ═══════════════════════════════════════════════════════════════════════
 
-_OBA_BIN = Path("/users_home/wangpengzheng/miniforge3/envs/plip/bin/obabel")
-
-
 def obabel_convert(
     input_path: str | Path,
     output_path: str | Path,
@@ -362,6 +396,7 @@ def obabel_convert(
     gen3d: bool = False,
     add_hydrogens: bool = False,
     ph: float = 7.4,
+    obabel_path: str | Path | None = None,
     **extra_flags: str,
 ) -> dict[str, Any]:
     """使用 Open Babel 进行分子格式转换。
@@ -386,9 +421,17 @@ def obabel_convert(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    obabel_input = filepath
+    if input_format.lower() in {"smi", "smiles"}:
+        obabel_input = out.parent / f"{filepath.stem}.obabel_input.smi"
+        with obabel_input.open("w", encoding="utf-8") as handle:
+            for mol_id, smiles in _iter_strict_smi(filepath):
+                handle.write(f"{smiles} {mol_id}\n")
+
+    obabel = Path(obabel_path) if obabel_path else Path("obabel")
     cmd = [
-        str(_OBA_BIN),
-        f"-i{input_format}", str(filepath),
+        str(obabel),
+        f"-i{input_format}", str(obabel_input),
         f"-o{output_format}", "-O", str(out),
     ]
     if gen3d:
@@ -398,14 +441,27 @@ def obabel_convert(
         cmd.insert(1, f"-p{ph}")
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    molecule_count = _count_records(out, output_format)
+    if result.returncode or not out.is_file() or molecule_count == 0:
+        raise RuntimeError(f"Open Babel conversion failed: {result.stderr[-500:]}")
 
     return {
         "input": str(filepath),
         "output": str(out),
         "returncode": result.returncode,
-        "molecules": result.stdout.count("1 molecule converted") if result.returncode == 0 else 0,
-        "stderr": result.stderr[:200] if result.returncode != 0 else "",
+        "molecules": molecule_count,
+        "stderr": "",
     }
+
+
+def _count_records(path: Path, fmt: str) -> int:
+    if not path.is_file():
+        return 0
+    if fmt.lower() == "sdf":
+        return path.read_text(errors="ignore").count("$$$$")
+    if fmt.lower() in {"smi", "smiles"}:
+        return sum(1 for line in path.read_text(errors="ignore").splitlines() if line.strip())
+    return 1 if path.stat().st_size > 0 else 0
 
 
 # ═══════════════════════════════════════════════════════════════════════

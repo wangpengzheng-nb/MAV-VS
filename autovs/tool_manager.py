@@ -630,8 +630,8 @@ class ToolManager:
         report_path = work_dir / "standardization_report.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
-            "standardized_library": str(output),
-            "report": str(report_path),
+            "standardized_library": output,
+            "standardization_report": report_path,
             "success": report["success"],
             "failed": report["failed"],
         }
@@ -651,8 +651,12 @@ class ToolManager:
             max_variants_per_compound=int(inputs.get("max_variants", 4)),
             max_conformers=int(inputs.get("max_conformers", 3)),
         )
-        return {"prepared_3d_sdf": str(output) if Path(output).is_file() else None,
-                "report": report}
+        report_path = work_dir / "ligand_3d_enumeration_report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"prepared_3d_sdf": output if output.is_file() else None,
+                "enumeration_report": report_path,
+                "variant_count": report.get("variant_count", 0),
+                "returncode": report.get("returncode", 0)}
 
     def _enumerate_ionization(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
         """Dimorphite-DL pH 依赖离子化枚举。"""
@@ -672,7 +676,20 @@ class ToolManager:
             ph_max=float(inputs.get("ph_max", 7.4)),
             max_states=int(inputs.get("max_states", 4)),
         )
-        return {"ionization_states": states, "count": len(states)}
+        ionized = work_dir / "ionized.smi"
+        with ionized.open("w", encoding="utf-8") as handle:
+            for item in states:
+                handle.write(f"{item['source_id']}__ion{item['variant_index']}\t{item['smiles']}\n")
+        report_path = work_dir / "ionization_report.json"
+        report_path.write_text(json.dumps({
+            "count": len(states),
+            "ph_min": float(inputs.get("ph_min", 7.4)),
+            "ph_max": float(inputs.get("ph_max", 7.4)),
+            "max_states": int(inputs.get("max_states", 4)),
+            "states_preview": states[:100],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ionized_library": ionized, "ionization_report": report_path,
+                "ionization_states": states[:100], "count": len(states)}
 
     def _prepare_pdbqt(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
         """Meeko PDBQT 参数化。"""
@@ -687,7 +704,10 @@ class ToolManager:
             library, output,
             ph=float(inputs.get("ph", 7.4)),
         )
-        return {"prepared_pdbqt": str(output) if report["success"] > 0 else None,
+        report_path = work_dir / "pdbqt_report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"prepared_pdbqt": output if report["success"] > 0 else None,
+                "pdbqt_report": report_path,
                 "success_count": report["success"], "total": report["total"]}
 
     def _convert_format(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
@@ -700,6 +720,7 @@ class ToolManager:
         library = ensure_within(library_path, self.allowed_roots, must_exist=True)
         out_format = str(inputs.get("output_format", "sdf"))
         output = work_dir / f"converted.{out_format}"
+        obabel_cfg = self._require_executor("obabel")
         report = obabel_convert(
             library, output,
             input_format=str(inputs.get("input_format", "smi")),
@@ -707,8 +728,12 @@ class ToolManager:
             gen3d=inputs.get("gen3d", False),
             add_hydrogens=inputs.get("add_hydrogens", True),
             ph=float(inputs.get("ph", 7.4)),
+            obabel_path=obabel_cfg.path,
         )
-        return {"converted": str(output), "report": report}
+        report_path = work_dir / "conversion_report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"converted": output, "conversion_report": report_path,
+                "molecules": report.get("molecules", 0)}
 
 
 def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:

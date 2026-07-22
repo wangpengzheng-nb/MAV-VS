@@ -43,12 +43,36 @@ def test_compiler_binds_symbolic_assets_and_rejects_external_library():
         {"step_id": "dock", "action_type": "molecular_docking"},
     ]}, input_manifest=_manifest())
     docking = next(step for step in plan.steps if step.action_type == ActionType.MOLECULAR_DOCKING)
-    assert {item.name for item in docking.inputs} == {"screening_library", "target_structure"}
+    assert {item.name for item in docking.inputs} == {"prepared_library", "target_structure"}
     with pytest.raises(ValueError, match="external library"):
         compile_strategy({"strategy_name": "bad", "pipeline": [
             {"step_id": "filter", "action_type": "physicochemical_filtering",
              "description": "replace the input with ZINC"},
         ]}, input_manifest=_manifest())
+
+
+def test_compiler_only_adds_docking_prerequisites_when_needed():
+    plan = compile_strategy({"strategy_name": "prep-only", "pipeline": [
+        {"step_id": "chembl", "action_type": "molecule_standardization_v2"},
+        {"step_id": "ion", "action_type": "ionization_enumeration"},
+    ]}, input_manifest=_manifest())
+    actions = [step.action_type for step in plan.steps]
+    assert ActionType.PROTEIN_PREPARATION not in actions
+    assert ActionType.POCKET_DEFINITION not in actions
+    assert ActionType.MOLECULE_STANDARDIZATION not in actions
+
+
+def test_compiler_accepts_new_molecule_tool_chain_for_docking():
+    plan = compile_strategy({"strategy_name": "new-tools", "pipeline": [
+        {"step_id": "chembl", "action_type": "molecule_standardization_v2"},
+        {"step_id": "gypsum", "action_type": "ligand_3d_enumeration"},
+        {"step_id": "dock", "action_type": "molecular_docking"},
+    ]}, input_manifest=_manifest())
+    actions = [step.action_type for step in plan.steps]
+    assert ActionType.MOLECULE_STANDARDIZATION not in actions
+    assert ActionType.PROTEIN_PREPARATION in actions
+    assert ActionType.POCKET_DEFINITION in actions
+    assert actions.index(ActionType.LIGAND_3D_ENUMERATION) < actions.index(ActionType.MOLECULAR_DOCKING)
 
 
 def test_compiler_rejects_service_owned_acquisition_and_absolute_paths():

@@ -33,6 +33,12 @@ POCKET_RESOLUTION = "pocket_resolution"        # PocketResolution dict
 POCKET_CENTER = "pocket_center"               # (float, float, float)
 POCKET_SIZE = "pocket_size"                   # (float, float, float)
 PREPARED_LIBRARY = "prepared_library"          # Path: prepared SDF
+STANDARDIZED_LIBRARY = "standardized_library"  # Path: ChEMBL standardized strict SMI
+IONIZED_LIBRARY = "ionized_library"            # Path: Dimorphite enumerated strict SMI
+ENUMERATED_3D_SDF = "enumerated_3d_sdf"        # Path: Gypsum/RDKit 3D SDF
+LIGAND_PDBQT = "ligand_pdbqt"                  # Path: Meeko ligand PDBQT
+CONVERTED_FORMAT = "converted_format"          # Path: Open Babel converted file
+MOLECULE_PREP_REPORTS = "molecule_prep_reports"  # list[Path]
 MANIFEST_CSV = "manifest_csv"                 # Path: molecule manifest CSV
 RECEPTOR_PDB = "receptor_pdb"                 # Path: cleaned receptor PDB
 RECEPTOR_PDBQT = "receptor_pdbqt"             # Path: receptor PDBQT
@@ -126,6 +132,8 @@ def _resolve_molecule_prep(state: dict[str, Any], **kwargs: Any) -> dict[str, An
 
 def _bind_molecule_prep(outputs: dict[str, Any], state: dict[str, Any]) -> None:
     state[PREPARED_LIBRARY] = outputs.get("prepared_library")
+    if outputs.get("prepared_library"):
+        state[ENUMERATED_3D_SDF] = outputs.get("prepared_library")
     state[MANIFEST_CSV] = outputs.get("manifest")
 
 
@@ -139,9 +147,12 @@ def _bind_protein_prep(outputs: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 def _resolve_docking(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    ligands_sdf = state.get(PREPARED_LIBRARY) or state.get(ENUMERATED_3D_SDF)
+    if not ligands_sdf and state.get(LIGAND_PDBQT):
+        raise KeyError("ligands_sdf (current docking adapter does not accept ligand_pdbqt)")
     return {
         "receptor_pdbqt": state[RECEPTOR_PDBQT],
-        "ligands_sdf": state[PREPARED_LIBRARY],
+        "ligands_sdf": ligands_sdf,
         "manifest_csv": state.get(MANIFEST_CSV),
         "center": state[POCKET_CENTER],
         "size": state[POCKET_SIZE],
@@ -244,6 +255,112 @@ def _bind_protonation(outputs: dict[str, Any], state: dict[str, Any]) -> None:
         state["_protonated_pqr"] = outputs["output_pqr"]
 
 
+def _current_smi_library(state: dict[str, Any]) -> str:
+    return state.get(IONIZED_LIBRARY) or state.get(STANDARDIZED_LIBRARY) or state[NORMALIZED_LIBRARY]
+
+
+def _remember_report(outputs: dict[str, Any], state: dict[str, Any], *names: str) -> None:
+    reports = state.setdefault(MOLECULE_PREP_REPORTS, [])
+    for name in names:
+        value = outputs.get(name)
+        if value:
+            reports.append(value)
+
+
+def _resolve_molecule_standardization_v2(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "library_path": state.get(STANDARDIZED_LIBRARY) or state[NORMALIZED_LIBRARY],
+        "remove_salts": kwargs.get("remove_salts", True),
+        "neutralize": kwargs.get("neutralize", False),
+    }
+
+
+def _bind_molecule_standardization_v2(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    if outputs.get("standardized_library"):
+        state[STANDARDIZED_LIBRARY] = outputs["standardized_library"]
+        state[NORMALIZED_LIBRARY] = outputs["standardized_library"]
+    _remember_report(outputs, state, "standardization_report", "report")
+
+
+def _resolve_ionization_enumeration(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "library_path": _current_smi_library(state),
+        "ph_min": kwargs.get("ph_min", kwargs.get("ph", 7.4)),
+        "ph_max": kwargs.get("ph_max", kwargs.get("ph", 7.4)),
+        "max_states": kwargs.get("max_states", 4),
+    }
+
+
+def _bind_ionization_enumeration(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    if outputs.get("ionized_library"):
+        state[IONIZED_LIBRARY] = outputs["ionized_library"]
+        state[NORMALIZED_LIBRARY] = outputs["ionized_library"]
+    _remember_report(outputs, state, "ionization_report")
+
+
+def _resolve_ligand_3d_enumeration(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "library_path": _current_smi_library(state),
+        "ph": kwargs.get("ph", 7.4),
+        "max_variants": kwargs.get("max_variants", 4),
+        "max_conformers": kwargs.get("max_conformers", 3),
+    }
+
+
+def _bind_ligand_3d_enumeration(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    if outputs.get("prepared_3d_sdf"):
+        state[ENUMERATED_3D_SDF] = outputs["prepared_3d_sdf"]
+        state[PREPARED_LIBRARY] = outputs["prepared_3d_sdf"]
+    _remember_report(outputs, state, "enumeration_report")
+
+
+def _resolve_pdbqt_parameterization(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "library_path": state.get(ENUMERATED_3D_SDF) or state[PREPARED_LIBRARY],
+        "ph": kwargs.get("ph", 7.4),
+    }
+
+
+def _bind_pdbqt_parameterization(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    if outputs.get("prepared_pdbqt"):
+        state[LIGAND_PDBQT] = outputs["prepared_pdbqt"]
+    _remember_report(outputs, state, "pdbqt_report")
+
+
+def _resolve_format_conversion(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    input_format = str(kwargs.get("input_format", "smi")).lower()
+    output_format = str(kwargs.get("output_format", "sdf")).lower()
+    if input_format in {"sdf", "mol", "mol2"}:
+        library_path = state.get(ENUMERATED_3D_SDF) or state.get(PREPARED_LIBRARY)
+    elif input_format == "pdbqt":
+        library_path = state.get(LIGAND_PDBQT)
+    else:
+        library_path = _current_smi_library(state)
+    if not library_path:
+        raise KeyError(f"library_path for {input_format} conversion")
+    return {
+        "library_path": library_path,
+        "input_format": input_format,
+        "output_format": output_format,
+        "gen3d": kwargs.get("gen3d", False),
+        "add_hydrogens": kwargs.get("add_hydrogens", True),
+        "ph": kwargs.get("ph", 7.4),
+    }
+
+
+def _bind_format_conversion(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    converted = outputs.get("converted")
+    if converted:
+        state[CONVERTED_FORMAT] = converted
+        suffix = Path(converted).suffix.lower()
+        if suffix == ".sdf":
+            state[ENUMERATED_3D_SDF] = converted
+            state[PREPARED_LIBRARY] = converted
+        elif suffix in {".smi", ".smiles"}:
+            state[NORMALIZED_LIBRARY] = converted
+    _remember_report(outputs, state, "conversion_report")
+
+
 # ── Registry maps ────────────────────────────────────────────────────
 
 INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
@@ -261,6 +378,11 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.STRUCTURE_ANALYSIS: _resolve_structure_analysis,
     ActionType.PROTEIN_REPAIR: _resolve_protein_repair,
     ActionType.PROTONATION: _resolve_protonation,
+    ActionType.MOLECULE_STANDARDIZATION_V2: _resolve_molecule_standardization_v2,
+    ActionType.IONIZATION_ENUMERATION: _resolve_ionization_enumeration,
+    ActionType.LIGAND_3D_ENUMERATION: _resolve_ligand_3d_enumeration,
+    ActionType.PDBQT_PARAMETERIZATION: _resolve_pdbqt_parameterization,
+    ActionType.FORMAT_CONVERSION: _resolve_format_conversion,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -278,6 +400,11 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.STRUCTURE_ANALYSIS: _bind_structure_analysis,
     ActionType.PROTEIN_REPAIR: _bind_protein_repair,
     ActionType.PROTONATION: _bind_protonation,
+    ActionType.MOLECULE_STANDARDIZATION_V2: _bind_molecule_standardization_v2,
+    ActionType.IONIZATION_ENUMERATION: _bind_ionization_enumeration,
+    ActionType.LIGAND_3D_ENUMERATION: _bind_ligand_3d_enumeration,
+    ActionType.PDBQT_PARAMETERIZATION: _bind_pdbqt_parameterization,
+    ActionType.FORMAT_CONVERSION: _bind_format_conversion,
 }
 
 

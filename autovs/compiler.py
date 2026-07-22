@@ -89,12 +89,46 @@ def _symbolic_inputs(action: ActionType) -> list[ArtifactRef]:
     if action in {ActionType.MOLECULE_STANDARDIZATION, ActionType.CONFORMER_GENERATION,
                   ActionType.PHYSICOCHEMICAL_FILTERING, ActionType.DIVERSITY_SELECTION}:
         return [ArtifactRef(name="screening_library", format="strict_smi_v1")]
+    if action == ActionType.MOLECULE_STANDARDIZATION_V2:
+        return [ArtifactRef(name="screening_library", format="strict_smi_v1")]
+    if action == ActionType.IONIZATION_ENUMERATION:
+        return [ArtifactRef(name="standardized_library", format="strict_smi_v1")]
+    if action == ActionType.LIGAND_3D_ENUMERATION:
+        return [ArtifactRef(name="standardized_or_ionized_library", format="strict_smi_v1")]
+    if action == ActionType.PDBQT_PARAMETERIZATION:
+        return [ArtifactRef(name="enumerated_3d_sdf", format="SDF")]
+    if action == ActionType.FORMAT_CONVERSION:
+        return [ArtifactRef(name="molecule_artifact", format="SMI/SDF/PDBQT")]
     if action in {ActionType.PROTEIN_PREPARATION, ActionType.POCKET_DEFINITION}:
+        return [ArtifactRef(name="target_structure", format="PDB")]
+    if action in {ActionType.STRUCTURE_ANALYSIS, ActionType.PROTEIN_REPAIR, ActionType.PROTONATION}:
         return [ArtifactRef(name="target_structure", format="PDB")]
     if action == ActionType.MOLECULAR_DOCKING:
         return [ArtifactRef(name="target_structure", format="PDB"),
-                ArtifactRef(name="screening_library", format="strict_smi_v1")]
+                ArtifactRef(name="prepared_library", format="SDF")]
     return []
+
+
+def _produces_ligand_sdf(step: WorkflowStep) -> bool:
+    if step.action_type in {
+        ActionType.MOLECULE_STANDARDIZATION,
+        ActionType.CONFORMER_GENERATION,
+        ActionType.PHYSICOCHEMICAL_FILTERING,
+        ActionType.LIGAND_3D_ENUMERATION,
+    }:
+        return True
+    return (
+        step.action_type == ActionType.FORMAT_CONVERSION
+        and str(step.parameters.get("output_format", "")).lower() == "sdf"
+    )
+
+
+def _insert_before_first(actions: list[WorkflowStep], target: ActionType, step: WorkflowStep) -> None:
+    for index, existing in enumerate(actions):
+        if existing.action_type == target:
+            actions.insert(index, step)
+            return
+    actions.append(step)
 
 
 def validate_workflow_bindings(plan: WorkflowPlan, manifest: InputManifest) -> None:
@@ -161,6 +195,8 @@ def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest 
                                               ActionType.TARGET_STRUCTURE_ACQUISITION,
                                               ActionType.INPUT_VALIDATION}]
 
+    requires_docking = any(step.action_type == ActionType.MOLECULAR_DOCKING for step in converted)
+
     mandatory_prefix = [WorkflowStep(
         step_id="input-validation", action_type=ActionType.INPUT_VALIDATION,
         inputs=[ArtifactRef(name="screening_library", format="strict_smi_v1")],
@@ -170,17 +206,33 @@ def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest 
             step_id="target-structure-acquisition", action_type=ActionType.TARGET_STRUCTURE_ACQUISITION,
             requires=[mandatory_prefix[-1].step_id],
         ))
-    mandatory_prefix.append(WorkflowStep(
-        step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION,
-        requires=[mandatory_prefix[-1].step_id], inputs=_symbolic_inputs(ActionType.POCKET_DEFINITION),
-    ))
-    existing = {s.action_type for s in converted}
-    if ActionType.PROTEIN_PREPARATION not in existing:
-        converted.insert(0, WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION,
-                                         inputs=_symbolic_inputs(ActionType.PROTEIN_PREPARATION)))
-    if ActionType.MOLECULE_STANDARDIZATION not in existing:
-        converted.insert(0, WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION,
-                                         inputs=_symbolic_inputs(ActionType.MOLECULE_STANDARDIZATION)))
+    if requires_docking:
+        mandatory_prefix.append(WorkflowStep(
+            step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION,
+            requires=[mandatory_prefix[-1].step_id], inputs=_symbolic_inputs(ActionType.POCKET_DEFINITION),
+        ))
+        before_docking = []
+        for step in converted:
+            before_docking.append(step)
+            if step.action_type == ActionType.MOLECULAR_DOCKING:
+                break
+        if not any(step.action_type == ActionType.PROTEIN_PREPARATION for step in before_docking):
+            _insert_before_first(
+                converted, ActionType.MOLECULAR_DOCKING,
+                WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION,
+                             inputs=_symbolic_inputs(ActionType.PROTEIN_PREPARATION)),
+            )
+        before_docking = []
+        for step in converted:
+            if step.action_type == ActionType.MOLECULAR_DOCKING:
+                break
+            before_docking.append(step)
+        if not any(_produces_ligand_sdf(step) for step in before_docking):
+            _insert_before_first(
+                converted, ActionType.MOLECULAR_DOCKING,
+                WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION,
+                             inputs=_symbolic_inputs(ActionType.MOLECULE_STANDARDIZATION)),
+            )
 
     # Rebuild a deterministic linear dependency chain after normalization.
     ordered = mandatory_prefix + converted

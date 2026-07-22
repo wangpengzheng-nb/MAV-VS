@@ -12,8 +12,12 @@ from autovs.dag import (
     ACTION_PHASE_MAP,
     COMPLEX_INDEX,
     DOCKED_POSES,
+    ENUMERATED_3D_SDF,
     INPUT_RESOLVERS,
+    IONIZED_LIBRARY,
+    LIGAND_PDBQT,
     MANIFEST_CSV,
+    MOLECULE_PREP_REPORTS,
     NORMALIZED_LIBRARY,
     OUTPUT_BINDERS,
     POCKET_CENTER,
@@ -23,6 +27,7 @@ from autovs.dag import (
     RECEPTOR_PDBQT,
     SCORES_CSV,
     SCREENING_LIBRARY,
+    STANDARDIZED_LIBRARY,
     TARGET_STRUCTURE,
     TOP_HITS,
     DAGExecutionError,
@@ -163,6 +168,39 @@ class TestInputResolvers:
         state = {SCORES_CSV: "/tmp/scores.csv"}
         inputs = INPUT_RESOLVERS[ActionType.FINAL_RANKING](state)
         assert inputs["scores_csv"] == state[SCORES_CSV]
+
+    def test_new_molecule_tool_resolvers_chain_artifacts(self):
+        state = {NORMALIZED_LIBRARY: "/tmp/input.smi"}
+        std_inputs = INPUT_RESOLVERS[ActionType.MOLECULE_STANDARDIZATION_V2](state)
+        assert std_inputs["library_path"] == "/tmp/input.smi"
+        OUTPUT_BINDERS[ActionType.MOLECULE_STANDARDIZATION_V2](
+            {"standardized_library": "/tmp/std.smi", "standardization_report": "/tmp/std.json"}, state,
+        )
+        ion_inputs = INPUT_RESOLVERS[ActionType.IONIZATION_ENUMERATION](state)
+        assert ion_inputs["library_path"] == "/tmp/std.smi"
+        OUTPUT_BINDERS[ActionType.IONIZATION_ENUMERATION](
+            {"ionized_library": "/tmp/ion.smi", "ionization_report": "/tmp/ion.json"}, state,
+        )
+        enum_inputs = INPUT_RESOLVERS[ActionType.LIGAND_3D_ENUMERATION](state)
+        assert enum_inputs["library_path"] == "/tmp/ion.smi"
+        OUTPUT_BINDERS[ActionType.LIGAND_3D_ENUMERATION](
+            {"prepared_3d_sdf": "/tmp/lig.sdf", "enumeration_report": "/tmp/enum.json"}, state,
+        )
+        assert state[STANDARDIZED_LIBRARY] == "/tmp/std.smi"
+        assert state[IONIZED_LIBRARY] == "/tmp/ion.smi"
+        assert state[ENUMERATED_3D_SDF] == "/tmp/lig.sdf"
+        assert state[PREPARED_LIBRARY] == "/tmp/lig.sdf"
+        assert state[MOLECULE_PREP_REPORTS] == ["/tmp/std.json", "/tmp/ion.json", "/tmp/enum.json"]
+
+    def test_meeko_pdbqt_does_not_replace_smina_sdf_input(self):
+        state = {ENUMERATED_3D_SDF: "/tmp/lig.sdf", PREPARED_LIBRARY: "/tmp/lig.sdf"}
+        inputs = INPUT_RESOLVERS[ActionType.PDBQT_PARAMETERIZATION](state)
+        assert inputs["library_path"] == "/tmp/lig.sdf"
+        OUTPUT_BINDERS[ActionType.PDBQT_PARAMETERIZATION](
+            {"prepared_pdbqt": "/tmp/lig.pdbqt", "pdbqt_report": "/tmp/pdbqt.json"}, state,
+        )
+        assert state[LIGAND_PDBQT] == "/tmp/lig.pdbqt"
+        assert state[PREPARED_LIBRARY] == "/tmp/lig.sdf"
 
     def test_missing_key_raises_keyerror(self):
         state = {}  # empty

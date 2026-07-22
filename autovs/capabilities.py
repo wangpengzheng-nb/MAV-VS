@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
 
 from autovs.config import PROJECT_ROOT, Settings
@@ -37,6 +38,65 @@ CAPABILITY_DEFINITIONS = {
 
 def _exists(path: Path | None) -> bool:
     return bool(path and path.exists())
+
+
+_SMOKE_CACHE: dict[tuple[str, str], tuple[bool, str]] = {}
+
+
+def _molecule_tool_smoke(action: ActionType, settings: Settings) -> tuple[bool, str]:
+    obabel_cfg = settings.executor_config("obabel")
+    obabel_path = str(obabel_cfg.path) if obabel_cfg and obabel_cfg.path else ""
+    key = (action.value, obabel_path)
+    if key in _SMOKE_CACHE:
+        return _SMOKE_CACHE[key]
+    try:
+        with tempfile.TemporaryDirectory(prefix="autovs_tool_smoke_") as tmp:
+            root = Path(tmp)
+            if action == ActionType.MOLECULE_STANDARDIZATION_V2:
+                from autovs.molecule_prep import standardize_molecules
+                source = root / "in.smi"
+                source.write_text("mol1\tCC(=O)[O-].[Na+]\n", encoding="utf-8")
+                out = root / "standardized.smi"
+                report = standardize_molecules(source, out)
+                text = out.read_text(encoding="utf-8")
+                ok = report["success"] == 1 and "[Na+]" not in text and not text.lower().startswith("source_id")
+            elif action == ActionType.IONIZATION_ENUMERATION:
+                from autovs.molecule_prep import enumerate_ionization
+                states = enumerate_ionization(["mol1\tCN(C)C"], max_states=4)
+                ok = bool(states) and states[0]["source_id"] == "mol1"
+            elif action == ActionType.LIGAND_3D_ENUMERATION:
+                from autovs.molecule_prep import prepare_ligands_3d
+                source = root / "in.smi"
+                source.write_text("mol1\tCCO\n", encoding="utf-8")
+                out = root / "ligands.sdf"
+                prepare_ligands_3d(source, out, max_variants_per_compound=1, max_conformers=1, num_processes=1)
+                ok = out.is_file() and out.stat().st_size > 0
+            elif action == ActionType.PDBQT_PARAMETERIZATION:
+                from autovs.molecule_prep import prepare_pdbqt
+                from rdkit import Chem
+                from rdkit.Chem import AllChem
+                mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+                AllChem.EmbedMolecule(mol, randomSeed=11)
+                AllChem.UFFOptimizeMolecule(mol)
+                sdf = root / "ligand.sdf"
+                writer = Chem.SDWriter(str(sdf)); writer.write(mol); writer.close()
+                out = root / "ligand.pdbqt"
+                report = prepare_pdbqt(sdf, out)
+                ok = report["success"] > 0 and out.is_file() and out.stat().st_size > 0
+            elif action == ActionType.FORMAT_CONVERSION:
+                from autovs.molecule_prep import obabel_convert
+                source = root / "in.smi"
+                source.write_text("mol1\tCCO\n", encoding="utf-8")
+                out = root / "out.sdf"
+                report = obabel_convert(source, out, obabel_path=obabel_path or None)
+                ok = report["molecules"] > 0 and out.is_file()
+            else:
+                ok = True
+        result = (ok, "" if ok else "small-molecule smoke test failed")
+    except Exception as exc:
+        result = (False, f"small-molecule smoke test failed: {type(exc).__name__}: {exc}")
+    _SMOKE_CACHE[key] = result
+    return result
 
 
 def list_capabilities(settings: Settings) -> list[ToolCapability]:
@@ -112,10 +172,18 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 __import__(mod)
             except ImportError:
                 availability, reason = "unavailable", f"{mod} not installed (pip install {mod})"
+            else:
+                ok, smoke_reason = _molecule_tool_smoke(action, settings)
+                if not ok:
+                    availability, reason = "unavailable", smoke_reason
         elif action == ActionType.FORMAT_CONVERSION:
             obabel_cfg = settings.executor_config("obabel")
             if not obabel_cfg or not obabel_cfg.exists(str(PROJECT_ROOT)):
                 availability, reason = "unavailable", "Open Babel not configured"
+            else:
+                ok, smoke_reason = _molecule_tool_smoke(action, settings)
+                if not ok:
+                    availability, reason = "unavailable", smoke_reason
         result.append(ToolCapability(
             action_type=action, name=name, description=desc, availability=availability,
             executor=executor, input_formats=inputs, output_formats=outputs,
