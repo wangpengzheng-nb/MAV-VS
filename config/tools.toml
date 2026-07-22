@@ -118,6 +118,34 @@ module = "pdb2pqr"
 health_check = "pdb2pqr"
 description = "PDB2PQR + PROPKA 质子化与电荷处理（pH可配pKa预测、加氢、力场参数分配）"
 
+[executors.chembl_std]
+name = "chembl_std"
+executor = "python_module"
+module = "chembl_structure_pipeline"
+health_check = "chembl_structure_pipeline"
+description = "ChEMBL Structure Pipeline 标准化+去盐（MIT）"
+
+[executors.gypsum_dl]
+name = "gypsum_dl"
+executor = "python_module"
+module = "gypsum_dl"
+health_check = "gypsum_dl"
+description = "Gypsum-DL 3D-ready 枚举（质子化/互变/立体/构象，Apache-2.0）"
+
+[executors.dimorphite_dl]
+name = "dimorphite_dl"
+executor = "python_module"
+module = "dimorphite_dl"
+health_check = "dimorphite_dl"
+description = "Dimorphite-DL pH依赖离子化枚举"
+
+[executors.meeko]
+name = "meeko"
+executor = "python_module"
+module = "meeko"
+health_check = "meeko"
+description = "Meeko AutoDock/Vina PDBQT 参数化"
+
 [environments]
 core = "autovs-core"
 smina = "smina_stage2"

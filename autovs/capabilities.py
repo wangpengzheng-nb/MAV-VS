@@ -28,8 +28,11 @@ CAPABILITY_DEFINITIONS = {
     ActionType.REPORT_GENERATION: ("Reproducibility reporter", "Generate Markdown, HTML and artifact manifest", "python", ["JSON", "CSV"], ["MD", "HTML", "JSON"], False),
     ActionType.STRUCTURE_ANALYSIS: ("Gemmi structure analyzer", "Validate PDB/mmCIF, detect ligands, extract chains, search pocket residues", "python", ["PDB", "mmCIF"], ["JSON", "TXT"], False),
     ActionType.PROTEIN_REPAIR: ("PDBFixer protein repair", "Add missing atoms/hydrogens, replace nonstandard residues, remove unwanted chains/heterogens", "python", ["PDB"], ["PDB", "JSON"], False),
-    ActionType.PROTONATION: ("PDB2PQR + PROPKA protonation", "pH-dependent pKa prediction, hydrogen addition, and forcefield parameter assignment", "python", ["PDB"], ["PQR", "PDB", "JSON"], False),
-}
+    ActionType.PROTONATION: ("PDB2PQR + PROPKA protonation", "pH-dependent pKa prediction, hydrogen addition, and forcefield parameter assignment", "python", ["PDB"], ["PQR", "PDB", "JSON"], False),    ActionType.MOLECULE_STANDARDIZATION_V2: ("ChEMBL standardizer", "Standardize + desalt molecules using ChEMBL pipeline (MIT)", "python", ["SMI"], ["SMI", "JSON"], False),
+    ActionType.LIGAND_3D_ENUMERATION: ("Gypsum-DL 3D enumeration", "Protonation/tautomer/stereo/conformer enumeration with limits (Apache-2.0)", "python", ["SMI"], ["SDF", "JSON"], False),
+    ActionType.IONIZATION_ENUMERATION: ("Dimorphite-DL ionization", "pH-dependent ionization state enumeration", "python", ["SMI"], ["JSON"], False),
+    ActionType.PDBQT_PARAMETERIZATION: ("Meeko PDBQT preparation", "AutoDock/Vina PDBQT parameterization with Gasteiger charges", "python", ["SDF"], ["PDBQT", "JSON"], False),
+    ActionType.FORMAT_CONVERSION: ("Open Babel converter", "General molecular format conversion (SMI/SDF/PDB/MOL2)", "conda", ["SMI", "SDF", "PDB"], ["SDF", "PDB", "PDBQT"], False),}
 
 
 def _exists(path: Path | None) -> bool:
@@ -96,6 +99,23 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 import pdb2pqr  # noqa: F401
             except ImportError:
                 availability, reason = "unavailable", "pdb2pqr Python package not installed (pip install pdb2pqr)"
+        elif action in {ActionType.MOLECULE_STANDARDIZATION_V2, ActionType.LIGAND_3D_ENUMERATION,
+                        ActionType.IONIZATION_ENUMERATION, ActionType.PDBQT_PARAMETERIZATION}:
+            mod_map = {
+                ActionType.MOLECULE_STANDARDIZATION_V2: "chembl_structure_pipeline",
+                ActionType.LIGAND_3D_ENUMERATION: "gypsum_dl",
+                ActionType.IONIZATION_ENUMERATION: "dimorphite_dl",
+                ActionType.PDBQT_PARAMETERIZATION: "meeko",
+            }
+            mod = mod_map.get(action, "")
+            try:
+                __import__(mod)
+            except ImportError:
+                availability, reason = "unavailable", f"{mod} not installed (pip install {mod})"
+        elif action == ActionType.FORMAT_CONVERSION:
+            obabel_cfg = settings.executor_config("obabel")
+            if not obabel_cfg or not obabel_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "Open Babel not configured"
         result.append(ToolCapability(
             action_type=action, name=name, description=desc, availability=availability,
             executor=executor, input_formats=inputs, output_formats=outputs,

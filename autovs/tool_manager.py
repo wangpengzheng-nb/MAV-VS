@@ -298,6 +298,16 @@ class ToolManager:
             return self._repair_protein(inputs, work_dir)
         if action == ActionType.PROTONATION:
             return self._protonate(inputs, work_dir)
+        if action == ActionType.MOLECULE_STANDARDIZATION_V2:
+            return self._standardize_v2(inputs, work_dir)
+        if action == ActionType.LIGAND_3D_ENUMERATION:
+            return self._enumerate_3d(inputs, work_dir)
+        if action == ActionType.IONIZATION_ENUMERATION:
+            return self._enumerate_ionization(inputs, work_dir)
+        if action == ActionType.PDBQT_PARAMETERIZATION:
+            return self._prepare_pdbqt(inputs, work_dir)
+        if action == ActionType.FORMAT_CONVERSION:
+            return self._convert_format(inputs, work_dir)
         raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
 
     def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
@@ -602,6 +612,103 @@ class ToolManager:
             "forcefield": forcefield,
             "warnings": report.get("warnings", []),
         }
+
+    def _standardize_v2(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """ChEMBL Structure Pipeline 标准化+去盐。"""
+        from autovs.molecule_prep import standardize_molecules
+
+        library_path = inputs.get("library_path")
+        if not library_path:
+            raise ValueError("需要 library_path")
+        library = ensure_within(library_path, self.allowed_roots, must_exist=True)
+        output = work_dir / "standardized.smi"
+        report = standardize_molecules(
+            library, output,
+            remove_salts=inputs.get("remove_salts", True),
+            neutralize=inputs.get("neutralize", False),
+        )
+        report_path = work_dir / "standardization_report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "standardized_library": str(output),
+            "report": str(report_path),
+            "success": report["success"],
+            "failed": report["failed"],
+        }
+
+    def _enumerate_3d(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Gypsum-DL 3D-ready 枚举。"""
+        from autovs.molecule_prep import prepare_ligands_3d
+
+        library_path = inputs.get("library_path")
+        if not library_path:
+            raise ValueError("需要 library_path")
+        library = ensure_within(library_path, self.allowed_roots, must_exist=True)
+        output = work_dir / "ligands_3d.sdf"
+        report = prepare_ligands_3d(
+            library, output,
+            ph=float(inputs.get("ph", 7.4)),
+            max_variants_per_compound=int(inputs.get("max_variants", 4)),
+            max_conformers=int(inputs.get("max_conformers", 3)),
+        )
+        return {"prepared_3d_sdf": str(output) if Path(output).is_file() else None,
+                "report": report}
+
+    def _enumerate_ionization(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Dimorphite-DL pH 依赖离子化枚举。"""
+        from autovs.molecule_prep import enumerate_ionization
+
+        smiles_list = inputs.get("smiles_list", [])
+        if not smiles_list:
+            # 从文件中读取 SMILES
+            lib = inputs.get("library_path", "")
+            if lib:
+                lib_path = ensure_within(lib, self.allowed_roots, must_exist=True)
+                with lib_path.open(encoding="utf-8") as f:
+                    smiles_list = [line.strip() for line in f if line.strip() and "\t" in line]
+        states = enumerate_ionization(
+            smiles_list,
+            ph_min=float(inputs.get("ph_min", 7.4)),
+            ph_max=float(inputs.get("ph_max", 7.4)),
+            max_states=int(inputs.get("max_states", 4)),
+        )
+        return {"ionization_states": states, "count": len(states)}
+
+    def _prepare_pdbqt(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Meeko PDBQT 参数化。"""
+        from autovs.molecule_prep import prepare_pdbqt
+
+        library_path = inputs.get("library_path")
+        if not library_path:
+            raise ValueError("需要 library_path（SDF 格式）")
+        library = ensure_within(library_path, self.allowed_roots, must_exist=True)
+        output = work_dir / "ligands.pdbqt"
+        report = prepare_pdbqt(
+            library, output,
+            ph=float(inputs.get("ph", 7.4)),
+        )
+        return {"prepared_pdbqt": str(output) if report["success"] > 0 else None,
+                "success_count": report["success"], "total": report["total"]}
+
+    def _convert_format(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Open Babel 格式转换。"""
+        from autovs.molecule_prep import obabel_convert
+
+        library_path = inputs.get("library_path")
+        if not library_path:
+            raise ValueError("需要 library_path")
+        library = ensure_within(library_path, self.allowed_roots, must_exist=True)
+        out_format = str(inputs.get("output_format", "sdf"))
+        output = work_dir / f"converted.{out_format}"
+        report = obabel_convert(
+            library, output,
+            input_format=str(inputs.get("input_format", "smi")),
+            output_format=out_format,
+            gen3d=inputs.get("gen3d", False),
+            add_hydrogens=inputs.get("add_hydrogens", True),
+            ph=float(inputs.get("ph", 7.4)),
+        )
+        return {"converted": str(output), "report": report}
 
 
 def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:

@@ -26,6 +26,11 @@ ALIASES = {
     "structure_analysis": ActionType.STRUCTURE_ANALYSIS,
     "protein_repair": ActionType.PROTEIN_REPAIR,
     "protonation": ActionType.PROTONATION,
+    "molecule_standardization_v2": ActionType.MOLECULE_STANDARDIZATION_V2,
+    "ligand_3d_enumeration": ActionType.LIGAND_3D_ENUMERATION,
+    "ionization_enumeration": ActionType.IONIZATION_ENUMERATION,
+    "pdbqt_parameterization": ActionType.PDBQT_PARAMETERIZATION,
+    "format_conversion": ActionType.FORMAT_CONVERSION,
 }
 
 UNSUPPORTED_V1 = {

@@ -300,6 +300,11 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
     ActionType.PROTEIN_REPAIR: "protein_preparation",
     ActionType.PROTONATION: "protein_preparation",
+    ActionType.MOLECULE_STANDARDIZATION_V2: "molecule_standardization",
+    ActionType.LIGAND_3D_ENUMERATION: "molecule_standardization",
+    ActionType.IONIZATION_ENUMERATION: "molecule_standardization",
+    ActionType.PDBQT_PARAMETERIZATION: "molecule_standardization",
+    ActionType.FORMAT_CONVERSION: "molecule_standardization",
 }
 
 

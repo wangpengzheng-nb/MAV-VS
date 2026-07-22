@@ -35,6 +35,11 @@ class ActionType(str, Enum):
     STRUCTURE_ANALYSIS = "structure_analysis"
     PROTEIN_REPAIR = "protein_repair"
     PROTONATION = "protonation"
+    MOLECULE_STANDARDIZATION_V2 = "molecule_standardization_v2"  # ChEMBL 标准化+去盐
+    LIGAND_3D_ENUMERATION = "ligand_3d_enumeration"             # Gypsum-DL 3D-ready
+    IONIZATION_ENUMERATION = "ionization_enumeration"            # Dimorphite-DL
+    PDBQT_PARAMETERIZATION = "pdbqt_parameterization"           # Meeko
+    FORMAT_CONVERSION = "format_conversion"                      # Open Babel
 
 
 class ArtifactRef(StrictModel):
@@ -257,7 +262,7 @@ class ToolCapability(StrictModel):
     name: str
     description: str
     availability: Literal["available", "degraded", "unavailable"]
-    executor: Literal["python", "conda", "slurm", "apptainer"]
+    executor: Literal["python", "conda", "slurm", "apptainer", "subprocess"]
     input_formats: list[str]
     output_formats: list[str]
     gpu_required: bool = False
