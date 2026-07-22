@@ -24,6 +24,7 @@ ALIASES = {
     "final_ranking": ActionType.FINAL_RANKING,
     "report_generation": ActionType.REPORT_GENERATION,
     "structure_analysis": ActionType.STRUCTURE_ANALYSIS,
+    "protein_repair": ActionType.PROTEIN_REPAIR,
 }
 
 UNSUPPORTED_V1 = {

@@ -294,6 +294,8 @@ class ToolManager:
             return self._run_plip(inputs, work_dir)
         if action == ActionType.STRUCTURE_ANALYSIS:
             return self._analyze_structure(inputs, work_dir)
+        if action == ActionType.PROTEIN_REPAIR:
+            return self._repair_protein(inputs, work_dir)
         raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
 
     def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
@@ -499,6 +501,48 @@ class ToolManager:
             output["pocket_residues_json"] = str(pocket_path)
 
         return output
+
+    def _repair_protein(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """PDBFixer 蛋白修复：补缺失原子/氢、处理非标准残基、删链/异质分子。"""
+        from autovs.pdbfixer_utils import repair_structure, quick_diagnostic
+
+        protein_path = inputs.get("protein_path")
+        if not protein_path:
+            raise ValueError("PROTEIN_REPAIR 需要 protein_path 输入")
+        protein = ensure_within(protein_path, self.allowed_roots, must_exist=True)
+
+        output_pdb = work_dir / "repaired.pdb"
+
+        # 先做快速诊断
+        diagnostic = quick_diagnostic(protein)
+        diagnostic_path = work_dir / "pre_repair_diagnostic.json"
+        diagnostic_path.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 执行修复
+        report = repair_structure(
+            protein,
+            output_pdb,
+            add_hydrogens=inputs.get("add_hydrogens", True),
+            add_missing_atoms=inputs.get("add_missing_atoms", True),
+            replace_nonstandard=inputs.get("replace_nonstandard", True),
+            remove_heterogens=inputs.get("remove_heterogens", True),
+            keep_chains=inputs.get("keep_chains"),
+            remove_chains=inputs.get("remove_chains"),
+            ph=float(inputs.get("ph", 7.4)),
+            long_gap_threshold=int(inputs.get("long_gap_threshold", 5)),
+        )
+
+        report_path = work_dir / "repair_report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+        return {
+            "repaired_structure": str(output_pdb),
+            "pre_repair_diagnostic": str(diagnostic_path),
+            "repair_report": str(report_path),
+            "long_gap_count": len(report["long_gaps"]),
+            "warnings": report["warnings"],
+            "missing_atoms_fixed": report["missing_atoms_summary"].get("total_missing", 0),
+        }
 
 
 def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:

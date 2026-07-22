@@ -33,6 +33,7 @@ class ActionType(str, Enum):
     FINAL_RANKING = "final_ranking"
     REPORT_GENERATION = "report_generation"
     STRUCTURE_ANALYSIS = "structure_analysis"
+    PROTEIN_REPAIR = "protein_repair"
 
 
 class ArtifactRef(StrictModel):

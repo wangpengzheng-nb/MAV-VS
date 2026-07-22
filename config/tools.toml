@@ -104,6 +104,13 @@ module = "gemmi"
 health_check = "gemmi"
 description = "Gemmi 结构解析库（PDB/mmCIF 读取、配体检测、链提取、口袋搜索）"
 
+[executors.pdbfixer]
+name = "pdbfixer"
+executor = "python_module"
+module = "pdbfixer"
+health_check = "pdbfixer"
+description = "PDBFixer 蛋白质结构修复（补缺失原子/氢、非标准残基替换、链/异质分子删除）"
+
 [environments]
 core = "autovs-core"
 smina = "smina_stage2"

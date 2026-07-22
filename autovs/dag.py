@@ -202,6 +202,28 @@ def _bind_structure_analysis(outputs: dict[str, Any], state: dict[str, Any]) -> 
         state["_structure_resolution"] = outputs["resolution"]
 
 
+def _resolve_protein_repair(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "protein_path": state[TARGET_STRUCTURE],
+        "add_hydrogens": kwargs.get("add_hydrogens", True),
+        "add_missing_atoms": kwargs.get("add_missing_atoms", True),
+        "replace_nonstandard": kwargs.get("replace_nonstandard", True),
+        "remove_heterogens": kwargs.get("remove_heterogens", True),
+        "keep_chains": kwargs.get("keep_chains"),
+        "remove_chains": kwargs.get("remove_chains"),
+        "ph": kwargs.get("ph", 7.4),
+        "long_gap_threshold": kwargs.get("long_gap_threshold", 5),
+    }
+
+
+def _bind_protein_repair(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    """修复后的结构更新 target_structure。"""
+    if outputs.get("repaired_structure"):
+        state[TARGET_STRUCTURE] = outputs["repaired_structure"]
+    if outputs.get("warnings"):
+        state["_repair_warnings"] = outputs["warnings"]
+
+
 # ── Registry maps ────────────────────────────────────────────────────
 
 INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
@@ -217,6 +239,7 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.INTERACTION_ANALYSIS: _resolve_interaction_analysis,
     ActionType.FINAL_RANKING: _resolve_final_ranking,
     ActionType.STRUCTURE_ANALYSIS: _resolve_structure_analysis,
+    ActionType.PROTEIN_REPAIR: _resolve_protein_repair,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -232,6 +255,7 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.INTERACTION_ANALYSIS: _bind_interaction_analysis,
     ActionType.FINAL_RANKING: _bind_final_ranking,
     ActionType.STRUCTURE_ANALYSIS: _bind_structure_analysis,
+    ActionType.PROTEIN_REPAIR: _bind_protein_repair,
 }
 
 
@@ -252,6 +276,7 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.INTERACTION_ANALYSIS: "interaction_analysis",
     ActionType.FINAL_RANKING: "final_ranking",
     ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
+    ActionType.PROTEIN_REPAIR: "protein_preparation",
 }
 
 

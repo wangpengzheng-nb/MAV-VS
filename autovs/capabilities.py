@@ -27,6 +27,7 @@ CAPABILITY_DEFINITIONS = {
     ActionType.FINAL_RANKING: ("Evidence ranker", "Direction-aware normalized ranking with scaffold diversity", "python", ["CSV", "SDF"], ["CSV", "SDF"], False),
     ActionType.REPORT_GENERATION: ("Reproducibility reporter", "Generate Markdown, HTML and artifact manifest", "python", ["JSON", "CSV"], ["MD", "HTML", "JSON"], False),
     ActionType.STRUCTURE_ANALYSIS: ("Gemmi structure analyzer", "Validate PDB/mmCIF, detect ligands, extract chains, search pocket residues", "python", ["PDB", "mmCIF"], ["JSON", "TXT"], False),
+    ActionType.PROTEIN_REPAIR: ("PDBFixer protein repair", "Add missing atoms/hydrogens, replace nonstandard residues, remove unwanted chains/heterogens", "python", ["PDB"], ["PDB", "JSON"], False),
 }
 
 
@@ -84,6 +85,11 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 import gemmi  # noqa: F401
             except ImportError:
                 availability, reason = "unavailable", "gemmi Python package not installed (pip install gemmi)"
+        elif action == ActionType.PROTEIN_REPAIR:
+            try:
+                import pdbfixer  # noqa: F401
+            except ImportError:
+                availability, reason = "unavailable", "pdbfixer Python package not installed (pip install pdbfixer)"
         result.append(ToolCapability(
             action_type=action, name=name, description=desc, availability=availability,
             executor=executor, input_formats=inputs, output_formats=outputs,
