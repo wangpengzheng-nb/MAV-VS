@@ -30,19 +30,19 @@
         <div class="section-heading">
           <span class="section-kicker">NEW RUN</span>
           <h1>定义筛选任务</h1>
-          <p>输入靶点基因缩写和筛选要求，系统将固化每一步计算证据。</p>
+          <p>用自然语言描述靶点和筛选要求，系统会先验证靶点身份，再固化每一步计算证据。</p>
         </div>
 
         <label class="field field-query" for="targetGeneInput">
-          <span class="field-label">靶点基因 <b>必需</b></span>
-          <input type="text" id="targetGeneInput" maxlength="50" placeholder="例如：PTGER2、EP2、BCL2、EGFR、KRAS" required autocomplete="off">
-          <span class="field-meta"><span>英文基因缩写，调研智能体直接据此检索</span></span>
+          <span class="field-label">靶点提示 <b>可选</b></span>
+          <input type="text" id="targetGeneInput" maxlength="50" placeholder="例如：PTGER2、EP2、BCL2、P00533" autocomplete="off">
+          <span class="field-meta"><span>可填写基因符号、别名或 UniProt ID，用于辅助消歧</span></span>
         </label>
 
         <label class="field field-query" for="queryInput">
-          <span class="field-label">筛选要求 <b>必需</b></span>
-          <textarea id="queryInput" rows="4" maxlength="3000" placeholder="例如：寻找共价抑制剂，MW 300-600，LogP 1-5。&#10;例如：寻找PROTAC分子，作用于巨噬细胞。&#10;例如：寻找非共价抑制剂，排除PAINS。" required></textarea>
-          <span class="field-meta"><span>机制、偏好、数值约束等</span><span id="queryCount">0 / 3000</span></span>
+          <span class="field-label">自然语言任务 <b>必需</b></span>
+          <textarea id="queryInput" rows="5" maxlength="3000" placeholder="例如：为人源 EGFR 寻找非共价抑制剂，MW 300-600，要求对同源激酶有选择性并排除 PAINS。" required></textarea>
+          <span class="field-meta"><span>靶点、物种、机制、偏好和数值约束</span><span id="queryCount">0 / 3000</span></span>
         </label>
 
         <div class="upload-grid">
@@ -151,6 +151,17 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog class="target-dialog" id="targetDialog" aria-labelledby="targetDialogTitle">
+    <form method="dialog">
+      <div class="target-dialog-heading">
+        <span class="section-kicker">TARGET IDENTITY</span>
+        <h2 id="targetDialogTitle">确认靶点身份</h2>
+        <p>检测到多个合理候选。请选择本次筛选所针对的蛋白。</p>
+      </div>
+      <div class="target-candidates" id="targetCandidates"></div>
+      <button class="secondary-button" value="cancel" type="submit">取消</button>
+    </form>
+  </dialog>
   <script src="/static/app.js?v=__APP_VERSION__"></script>
 </body>
 </html>

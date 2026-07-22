@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json, os, re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -77,6 +77,17 @@ class DetailedStrategy(BaseModel):
     estimated_runtime_category: str = Field(default="days")
     knowledge_dependencies: List[str] = Field(default_factory=list)
     applicability_conditions: ApplicabilityConditions = Field(default_factory=ApplicabilityConditions)
+    problem_focus: str = Field(default="")
+    target_evidence_refs: List[str] = Field(default_factory=list)
+    user_requirement_coverage: List[str] = Field(default_factory=list)
+    diversity_axis: str = Field(default="")
+    risk_level: Literal["low", "medium", "high"] = "medium"
+    why_this_strategy_fits_target: str = Field(default="")
+    execution_status: Literal[
+        "currently_executable", "partially_executable", "future_capability_required",
+    ] = "currently_executable"
+    required_capabilities: List[str] = Field(default_factory=list)
+    missing_capabilities: List[str] = Field(default_factory=list)
 
     # 向后兼容别名
     @property
@@ -93,16 +104,73 @@ class DetailedStrategy(BaseModel):
 
 
 # 注册 model_rebuild
-for _m in [ActionInput, ActionOutput, PipelineAction, TargetProfile,
-            ContingencyPlan, ApplicabilityConditions, DetailedStrategy]:
+class StrategyContext(BaseModel):
+    target_name: str = "Unknown target"
+    gene_symbol: str = ""
+    uniprot_id: str = ""
+    user_query: str = ""
+    target_class: str = "other"
+    pocket_type: str = "unknown"
+    pocket_polarity: str = "unknown"
+    rule_category: str = "Ro5"
+    mw_range: list[float] = Field(default_factory=lambda: [250, 600])
+    logp_range: list[float] = Field(default_factory=lambda: [0.0, 5.0])
+    has_experimental_structure: bool = False
+    has_holo_structure: bool = False
+    predicted_structure_required: bool = False
+    has_known_active_ligands: bool = False
+    best_pdb_id: str = ""
+    best_pdb_resolution: float | None = None
+    activity_range_nm: list[float] = Field(default_factory=list)
+    selectivity_constraints: list[str] = Field(default_factory=list)
+    excluded_targets: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_levels: dict[str, str] = Field(default_factory=dict)
+
+
+class StrategyBlueprint(BaseModel):
+    blueprint_id: str
+    strategy_name: str
+    approach_category: str
+    problem_focus: str
+    diversity_axis: str
+    risk_level: Literal["low", "medium", "high"] = "medium"
+    preferred_actions: list[str]
+    future_actions: list[str] = Field(default_factory=list)
+    requires_ligands: bool = False
+    rationale_hint: str = ""
+
+
+# 注册 model_rebuild
+for _m in [ActionInput, ActionOutput, PipelineAction, TargetProfile, StrategyContext,
+            StrategyBlueprint, ContingencyPlan, ApplicabilityConditions, DetailedStrategy]:
     _m.model_rebuild()
+
+
+EXECUTABLE_STRATEGY_ACTIONS = {
+    "library_preparation", "protein_preparation", "binding_site_detection",
+    "physicochemical_filtering", "molecular_docking", "interaction_analysis",
+    "final_ranking", "report_generation",
+}
+FUTURE_ACTION_CAPABILITIES = {
+    "target_structure_prediction": "AlphaFold/Boltz target structure prediction adapter",
+    "admet_filtering": "ADMET-AI production adapter",
+    "molecular_dynamics": "GROMACS/MD production workflow",
+    "short_md": "GROMACS short MD quality gate",
+    "similarity_screening": "2D/3D ligand similarity screening engine",
+    "pharmacophore_screening": "pharmacophore model generation and screening",
+    "shape_matching": "3D shape/electrostatic similarity engine",
+    "fragment_screening": "fragment docking/growing workflow",
+    "consensus_scoring": "multi-engine consensus scoring workflow",
+    "machine_learning_scoring": "ML rescoring model",
+}
 
 
 class StrategyGeneratorAgent:
     def __init__(self, model="deepseek-chat", api_key=None, api_base=None, temperature=0.5, max_tokens=8192):
         self.model = model
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-        self.api_base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+        self.api_key = os.getenv("DEEPSEEK_API_KEY") if api_key is None else api_key
+        self.api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com") if api_base is None else api_base
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._client: Optional[OpenAI] = None
@@ -113,34 +181,263 @@ class StrategyGeneratorAgent:
             self._client = OpenAI(api_key=self.api_key, base_url=f"{self.api_base}/v1")
         return self._client
 
-    def generate_strategies(self, research_report: dict, target_info=None, prior_knowledge: str = ""):
-        # 优先使用执行摘要, 否则 fallback 到完整报告
-        summary = research_report.get("executive_summary", "")
-        if summary:
-            report_text = summary
-        else:
-            report_text = research_report.get("full_report_text", "")
-        if not report_text:
-            report_text = json.dumps(research_report, ensure_ascii=False, indent=2)
+    @staticmethod
+    def _report_text(research_report: dict) -> str:
+        text = research_report.get("executive_summary") or research_report.get("full_report_text") or ""
+        return text or json.dumps(research_report, ensure_ascii=False, indent=2)
 
-        target_name = research_report.get("target_name", "Unknown")
-        target_gene = research_report.get("gene_symbol", "")
-        target_uniprot = research_report.get("uniprot_id", "")
+    @classmethod
+    def build_strategy_context(cls, research_report: dict) -> StrategyContext:
+        text = cls._report_text(research_report)
+        km = research_report.get("key_metrics") if isinstance(research_report.get("key_metrics"), dict) else {}
+        readiness = research_report.get("structure_readiness") or {}
+        structures = research_report.get("verified_pdb_structures") or []
+        activities = research_report.get("chembl_activities") or []
+        intent = research_report.get("intent") or {}
+        query = research_report.get("_user_query") or intent.get("raw_query", "")
+        gene = research_report.get("gene_symbol") or research_report.get("target_gene") or ""
+        target_name = research_report.get("target_name") or research_report.get("protein_name") or gene or "Unknown target"
+        uniprot_id = research_report.get("uniprot_id") or research_report.get("target_uniprot_id") or ""
+
+        target_class, class_level = cls._infer_target_class(gene, target_name, text)
+        pocket_type, pocket_level = cls._infer_pocket_type(km, text, target_class)
+        mw_range = cls._numeric_pair(km.get("known_ligand_mw_range")) or cls._mw_range_for(target_class, pocket_type)
+        logp_range = cls._numeric_pair(km.get("known_ligand_logp_range")) or ([1.0, 6.5] if target_class == "PPI" else [0.0, 5.0])
+        rule_category = str(km.get("recommended_rule_category") or ("bRo5" if target_class == "PPI" or "ppi" in pocket_type.lower() else "Ro5"))
+        activity_range = cls._numeric_pair(km.get("known_ligand_ic50_range_nm")) or cls._activity_range_from_records(activities)
+
+        holo = [item for item in structures if isinstance(item, dict) and item.get("has_ligand")]
+        best = next(iter(holo or structures), {}) if structures else {}
+        best_pdb = str(readiness.get("recommended_pdb_id") or research_report.get("recommended_pdb_for_docking") or best.get("pdb_id") or "")
+        best_res = cls._as_float(km.get("best_pdb_resolution") or best.get("resolution"))
+        has_structure = bool(structures or readiness.get("experimental_holo_available") or readiness.get("experimental_apo_available"))
+        predicted_required = bool(readiness.get("predicted_structure_required"))
+        selectivity, excluded = cls._extract_user_constraints(query, intent)
+        selectivity.extend(str(item) for item in km.get("selectivity_residues", []) if item)
+        refs = cls._evidence_refs(best_pdb, best_res, activity_range, structures, activities, text)
+
+        return StrategyContext(
+            target_name=target_name, gene_symbol=gene, uniprot_id=uniprot_id, user_query=query,
+            target_class=target_class, pocket_type=pocket_type,
+            pocket_polarity=str(km.get("pocket_polarity") or "mixed" if pocket_type != "unknown" else "unknown"),
+            rule_category=rule_category, mw_range=mw_range, logp_range=logp_range,
+            has_experimental_structure=has_structure, has_holo_structure=bool(holo or readiness.get("experimental_holo_available")),
+            predicted_structure_required=predicted_required, has_known_active_ligands=bool(activities or activity_range),
+            best_pdb_id=best_pdb, best_pdb_resolution=best_res, activity_range_nm=activity_range,
+            selectivity_constraints=list(dict.fromkeys(selectivity)),
+            excluded_targets=list(dict.fromkeys(excluded)),
+            evidence_refs=refs,
+            evidence_levels={
+                "target_class": class_level, "pocket_type": pocket_level,
+                "structure": "direct_api" if has_structure else ("direct_api" if predicted_required else "unknown"),
+                "ligands": "direct_api" if activities else ("direct_api" if activity_range else "unknown"),
+                "user_constraints": "direct_api" if intent else ("text_inferred" if query else "unknown"),
+            },
+        )
+
+    @staticmethod
+    def _infer_target_class(gene: str, target_name: str, text: str) -> tuple[str, str]:
+        hay = f"{gene} {target_name} {text[:5000]}".lower()
+        if any(x in hay for x in ("bcl-2", "bcl2", "bcl-xl", "bclxl", "apoptosis regulator", "ppi", "protein-protein")):
+            return "PPI", "text_inferred"
+        if any(x in hay for x in ("kinase", "egfr", "abl1", "jak", "mapk", "atp-binding")):
+            return "Kinase", "text_inferred"
+        if any(x in hay for x in ("g protein-coupled", "gpcr", "receptor")):
+            return "GPCR", "text_inferred"
+        if any(x in hay for x in ("protease", "proteinase", "caspase")):
+            return "Protease", "text_inferred"
+        return "other", "unknown"
+
+    @staticmethod
+    def _infer_pocket_type(km: dict, text: str, target_class: str) -> tuple[str, str]:
+        raw = str(km.get("pocket_type") or "").strip()
+        if raw and raw.lower() != "unknown":
+            return raw, "direct_api"
+        hay = text[:6000].lower()
+        if target_class == "PPI" or any(x in hay for x in ("bh3", "hydrophobic groove", "shallow groove")):
+            return "shallow_groove", "text_inferred"
+        if target_class == "Kinase" or "hinge" in hay or "atp" in hay:
+            return "deep_cleft", "text_inferred"
+        if "allosteric" in hay or "别构" in hay:
+            return "allosteric", "text_inferred"
+        return "unknown", "unknown"
+
+    @staticmethod
+    def _numeric_pair(value: Any) -> list[float]:
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return [float(value[0]), float(value[1])]
+            except (TypeError, ValueError):
+                return []
+        return []
+
+    @staticmethod
+    def _as_float(value: Any) -> float | None:
+        try:
+            return float(value) if value not in (None, "", "N/A") else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _mw_range_for(target_class: str, pocket_type: str) -> list[float]:
+        if target_class == "PPI" or "ppi" in pocket_type.lower() or "groove" in pocket_type.lower():
+            return [350, 900]
+        if target_class == "Kinase":
+            return [250, 550]
+        return [250, 650]
+
+    @staticmethod
+    def _activity_range_from_records(records: list) -> list[float]:
+        values = []
+        for item in records:
+            if isinstance(item, dict):
+                try:
+                    values.append(float(item.get("standard_value")))
+                except (TypeError, ValueError):
+                    pass
+        return [min(values), max(values)] if values else []
+
+    @staticmethod
+    def _extract_user_constraints(query: str, intent: dict) -> tuple[list[str], list[str]]:
+        selectivity, excluded = [], []
+        for req in intent.get("requirements", []) if isinstance(intent, dict) else []:
+            if isinstance(req, dict) and req.get("category") in {"selectivity", "off_target"}:
+                selectivity.append(str(req.get("original_text") or req.get("normalized_key") or "selectivity requirement"))
+        excluded.extend(str(item) for item in (intent.get("excluded_targets", []) if isinstance(intent, dict) else []) if item)
+        if re.search(r"不要|禁止|排除|避免|avoid|exclude|selectiv|选择性|同源", query, re.I):
+            selectivity.append(query[:240])
+            excluded.extend(re.findall(r"\b[A-Z][A-Z0-9-]{1,15}\b", query))
+        return selectivity, [item for item in excluded if item.upper() not in {"PDB", "SMI", "IC50", "ADMET"}]
+
+    @staticmethod
+    def _evidence_refs(best_pdb: str, best_res: float | None, activity_range: list[float],
+                       structures: list, activities: list, text: str) -> list[str]:
+        refs = []
+        if best_pdb:
+            refs.append(f"verified_structure:{best_pdb}" + (f":{best_res:g}A" if best_res else ""))
+        if structures:
+            refs.append(f"rcsb_structures:{len(structures)}")
+        if activities:
+            refs.append(f"chembl_activities:{len(activities)}")
+        if activity_range:
+            refs.append(f"activity_range_nm:{activity_range[0]:g}-{activity_range[1]:g}")
+        if "BH3" in text or "bh3" in text:
+            refs.append("text_evidence:BH3 binding groove")
+        return refs or ["evidence:limited_target_research"]
+
+    def plan_strategy_blueprints(self, context: StrategyContext, *, count: int = 8) -> list[StrategyBlueprint]:
+        blueprints = [
+            StrategyBlueprint(
+                blueprint_id="structure_precision", strategy_name="结构精筛对接漏斗",
+                approach_category="structure_precision_docking", problem_focus="利用可信口袋进行高精度非共价结构筛选",
+                diversity_axis="structure_precision", risk_level="low",
+                preferred_actions=["library_preparation", "protein_preparation", "binding_site_detection", "physicochemical_filtering", "molecular_docking", "interaction_analysis", "final_ranking", "report_generation"],
+                rationale_hint="优先把结构证据转化为可执行对接和相互作用质量门禁。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="wide_exploration", strategy_name="宽松探索型筛选漏斗",
+                approach_category="recall_first_exploration", problem_focus="在靶点信息不完备时提高召回率并保留新骨架",
+                diversity_axis="recall_and_scaffold_coverage", risk_level="medium",
+                preferred_actions=["library_preparation", "physicochemical_filtering", "molecular_docking", "diversity_selection", "final_ranking", "report_generation"],
+                rationale_hint="用较宽阈值减少漏筛，再靠多样性和排序压缩候选。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="selectivity_guard", strategy_name="选择性避靶筛选策略",
+                approach_category="selectivity_aware_screening", problem_focus="回应用户选择性和同源靶点排除需求",
+                diversity_axis="selectivity_constraints", risk_level="medium",
+                preferred_actions=["physicochemical_filtering", "molecular_docking", "interaction_analysis", "final_ranking", "report_generation"],
+                future_actions=["counter_docking", "selectivity_panel_scoring"],
+                rationale_hint="围绕差异残基、避靶和相互作用指纹筛掉同源靶点风险。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="ligand_sar", strategy_name="已知配体/SAR 聚焦策略",
+                approach_category="ligand_sar_guided_screening", problem_focus="利用已知活性配体和SAR收缩化学空间",
+                diversity_axis="known_ligand_sar", risk_level="medium", requires_ligands=True,
+                preferred_actions=["library_preparation", "physicochemical_filtering", "molecular_docking", "final_ranking", "report_generation"],
+                future_actions=["similarity_screening", "pharmacophore_screening"],
+                rationale_hint="用已知活性和药效团约束提升命中率，同时标注配体依赖风险。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="pocket_family_specific", strategy_name="靶点口袋特异性策略",
+                approach_category="target_class_specific_screening", problem_focus="针对靶点类别和口袋形态设置专属理化与相互作用规则",
+                diversity_axis="target_class_rules", risk_level="medium",
+                preferred_actions=["physicochemical_filtering", "molecular_docking", "interaction_analysis", "final_ranking", "report_generation"],
+                rationale_hint="PPI走bRo5/疏水沟槽；激酶走hinge/ATP口袋；蛋白酶走催化口袋约束。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="admet_first", strategy_name="成药性与毒性风险优先策略",
+                approach_category="developability_first_screening", problem_focus="降低湿实验前明显ADMET和反应性风险",
+                diversity_axis="developability_risk", risk_level="low",
+                preferred_actions=["library_preparation", "physicochemical_filtering", "molecular_docking", "final_ranking", "report_generation"],
+                future_actions=["admet_filtering"],
+                rationale_hint="把早期不适合推进的小分子风险前置处理。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="fragment_shape_future", strategy_name="片段/形状探索未来路线",
+                approach_category="fragment_shape_exploration", problem_focus="探索非模板骨架和局部口袋占位方式",
+                diversity_axis="novel_chemotypes", risk_level="high",
+                preferred_actions=["binding_site_detection", "molecular_docking", "final_ranking", "report_generation"],
+                future_actions=["fragment_screening", "shape_matching"],
+                rationale_hint="为后续片段库、形状匹配或药效团工具接入预留科学路线。",
+            ),
+            StrategyBlueprint(
+                blueprint_id="stability_validation", strategy_name="姿态稳定性验证增强策略",
+                approach_category="pose_stability_validation", problem_focus="减少对接假阳性，优先输出姿态稳定候选",
+                diversity_axis="dynamic_stability", risk_level="high",
+                preferred_actions=["molecular_docking", "interaction_analysis", "final_ranking", "report_generation"],
+                future_actions=["molecular_dynamics", "consensus_scoring"],
+                rationale_hint="把少量Top候选送入动态稳定性和多评分验证。",
+            ),
+        ]
+        if context.predicted_structure_required:
+            for bp in blueprints:
+                if "target_structure_prediction" not in bp.future_actions:
+                    bp.future_actions.insert(0, "target_structure_prediction")
+        if not context.has_known_active_ligands:
+            for bp in blueprints:
+                if bp.blueprint_id == "ligand_sar":
+                    bp.problem_focus = "已知配体证据不足时，仅作为未来 ChEMBL/SAR 增强路线"
+                    bp.risk_level = "high"
+        if context.selectivity_constraints:
+            blueprints.insert(1, blueprints.pop(next(i for i, bp in enumerate(blueprints) if bp.blueprint_id == "selectivity_guard")))
+        return blueprints[:count]
+
+    @staticmethod
+    def _build_context_block(context: StrategyContext) -> str:
+        return json.dumps({
+            "target": context.model_dump(),
+            "instructions": [
+                "策略必须引用 target.evidence_refs 中的证据或说明 evidence:limited_target_research",
+                "策略阈值必须从 mw_range/logp_range/rule_category 出发，不能套用无关默认值",
+                "用户选择性/避靶需求必须进入 user_requirement_coverage",
+                "暂未接入工具必须进入 missing_capabilities，不能伪装可执行",
+            ],
+        }, ensure_ascii=False, indent=2)
+
+    def generate_strategies(self, research_report: dict, target_info=None, prior_knowledge: str = ""):
+        context = self.build_strategy_context(research_report)
+        report_text = self._report_text(research_report)
+        target_name = context.target_name
+        target_gene = context.gene_symbol
+        target_uniprot = context.uniprot_id
         vector_db_path = research_report.get("_vector_db_path", "")
-        user_query = research_report.get("_user_query", "")
+        prediction_required = context.predicted_structure_required
+        blueprints = self.plan_strategy_blueprints(context, count=8)
 
         # 构建一次共享上下文（metrics + constraints），复用给每次单策略调用
-        metrics_block = self._build_metrics_block(report_text)
-        pdbs_in_report = re.findall(r'\b[0-9][A-Z0-9]{3}\b', report_text[:2000])
-        pdb_note = ""
-        if pdbs_in_report:
-            unique_pdbs = list(dict.fromkeys(pdbs_in_report))[:8]
-            pdb_note = f"\n⚠️ 已有PDB: {', '.join(unique_pdbs)}。禁止说'无实验结构'!\n"
+        metrics_block = self._build_context_block(context)
+        pdb_note = f"\n⚠️ 已验证结构: {context.best_pdb_id or '无明确推荐PDB'}。\n" if context.has_experimental_structure else ""
+        if prediction_required:
+            pdb_note = (
+                "\n⚠️ 调研已确认没有可用实验共晶结构。每个策略必须以 "
+                "target_structure_prediction 动作开始，由能力层在未来选择 AlphaFold/Boltz；"
+                "不得虚构PDB或口袋坐标。\n"
+            )
 
         constraint_block = ""
-        if user_query:
+        if context.user_query:
             constraint_block = f"""## 🚨 用户约束
-{user_query}
+{context.user_query}
 ❌ 禁止忽略用户库/口袋/数值约束
 ---
 """
@@ -152,23 +449,28 @@ class StrategyGeneratorAgent:
 ---
 """
 
-        # ============================================================
-        # 逐策略独立生成：每个策略独占完整 8K token 配额，杜绝截断
-        # 目标 8-10 个，每个 2 次重试机会，已生成策略作为差异化上下文
-        # ============================================================
+        if not self.api_key:
+            fallback = self._fallback_from_context(context, blueprints)
+            return {
+                "strategies": fallback,
+                "strategy_context": context.model_dump(),
+                "generation_rationale": "离线规则化策略蓝图兜底：无 LLM API key",
+            }
+
         from time import sleep as _sleep
-        TARGET_COUNT = 8
-        MIN_SUCCESS = 3
+        MIN_SUCCESS = 5
         strategies: list[dict] = []
         existing_summaries: list[str] = []
 
-        for idx in range(TARGET_COUNT):
+        for idx, blueprint in enumerate(blueprints):
             single_prompt = self._build_single_strategy_prompt(
                 target_name, target_gene, target_uniprot,
                 report_text, metrics_block, pdb_note,
                 constraint_block, prior_block,
                 existing_summaries=existing_summaries,
                 strategy_index=idx + 1,
+                blueprint=blueprint,
+                context=context,
             )
             generated = False
             for attempt in range(2):
@@ -184,7 +486,10 @@ class StrategyGeneratorAgent:
                 if raw:
                     print(f"  ⚠️ 策略{idx+1}第{attempt+1}次失败 (raw={len(raw)}chars)", flush=True)
             if not generated:
-                print(f"  ❌ 策略{idx+1} 2次都失败，跳过", flush=True)
+                print(f"  ❌ 策略{idx+1} 2次都失败，使用规则化蓝图兜底", flush=True)
+                fallback = self._strategy_from_blueprint(context, blueprint, idx + 1)
+                strategies.append(fallback)
+                existing_summaries.append(self._summarize_strategy(fallback))
 
         # 不足时回退批量模式兜底（prompt 要求 4-6 个）
         if len(strategies) < MIN_SUCCESS:
@@ -192,7 +497,7 @@ class StrategyGeneratorAgent:
             _sleep(2)
             batch_prompt = self._build_strategy_prompt(
                 target_name, target_gene, target_uniprot,
-                report_text, user_query, prior_knowledge,
+                report_text, context.user_query, prior_knowledge,
             )
             for attempt in range(2):
                 if attempt > 0:
@@ -206,7 +511,12 @@ class StrategyGeneratorAgent:
                     break
 
         if len(strategies) >= MIN_SUCCESS:
+            strategies = self._quality_gate_strategies(
+                self._ensure_structure_prediction(strategies, prediction_required),
+                context, blueprints,
+            )
             return {"strategies": strategies,
+                    "strategy_context": context.model_dump(),
                     "generation_rationale": f"成功生成{len(strategies)}个策略 (逐策略独立生成, 各占独立token配额)"}
 
         # 简化 prompt 最后尝试
@@ -215,19 +525,246 @@ class StrategyGeneratorAgent:
 不可变上下文: {prior_knowledge[:2000]}"""
         strategies, _ = self._call_llm(simple_prompt, target_name, target_gene, vector_db_path)
         if strategies and len(strategies) >= MIN_SUCCESS:
-            return {"strategies": strategies, "generation_rationale": "简化prompt重试成功"}
+            strategies = self._quality_gate_strategies(
+                self._ensure_structure_prediction(strategies, prediction_required),
+                context, blueprints,
+            )
+            return {"strategies": strategies, "strategy_context": context.model_dump(),
+                    "generation_rationale": "简化prompt重试成功"}
 
         # 兜底：确定性模板
         print(f"\n⚠️ 所有LLM调用失败, 使用确定性模板。", flush=True)
-        fallback_result = self._fallback(target_name, target_gene)
-        if fallback_result.get("strategies"):
-            return {"strategies": fallback_result["strategies"],
-                    "generation_rationale": "确定性模板(LLM不可用)"}
+        fallback_strategies = self._fallback_from_context(context, blueprints)
+        return {"strategies": fallback_strategies, "strategy_context": context.model_dump(),
+                "generation_rationale": "规则化策略蓝图兜底"}
 
-        raise RuntimeError(
-            f"策略生成失败: 所有尝试均未产出>={MIN_SUCCESS}个有效策略。"
-            f"请运行 autovs doctor 检查环境。"
+    @staticmethod
+    def _ensure_structure_prediction(strategies: list[dict], required: bool) -> list[dict]:
+        if not required:
+            return strategies
+        for strategy in strategies:
+            pipeline = strategy.get("pipeline") or strategy.get("pipeline_steps") or []
+            if not isinstance(pipeline, list):
+                pipeline = []
+            if not any(step.get("action_type") == "target_structure_prediction" for step in pipeline):
+                pipeline.insert(0, {
+                    "step_number": 1,
+                    "action_type": "target_structure_prediction",
+                    "action_name": "预测并验证靶点结构",
+                    "description": "调用能力层提供的结构预测工具，并在进入口袋识别与对接前完成结构和置信度质量门禁。",
+                    "input": {"type": "verified_target_identity", "format": "JSON"},
+                    "output": {"type": "predicted_target_structure", "format": "PDB/CIF"},
+                    "parameters": {}, "quality_criteria": "结构置信度与口袋质量门禁通过",
+                    "cardinality_estimate": "1 target -> 1 validated structure",
+                    "computational_cost": "high", "requires": ["verified_target_identity"],
+                })
+            for index, step in enumerate(pipeline, 1):
+                step["step_number"] = index
+            strategy["pipeline"] = pipeline
+            strategy.setdefault("target_profile", {})["has_experimental_structure"] = False
+        return strategies
+
+    def _fallback_from_context(self, context: StrategyContext,
+                               blueprints: list[StrategyBlueprint] | None = None) -> list[dict]:
+        blueprints = blueprints or self.plan_strategy_blueprints(context, count=8)
+        return self._quality_gate_strategies(
+            [self._strategy_from_blueprint(context, blueprint, index + 1)
+             for index, blueprint in enumerate(blueprints)],
+            context, blueprints,
         )
+
+    def _strategy_from_blueprint(self, context: StrategyContext,
+                                 blueprint: StrategyBlueprint, index: int) -> dict:
+        actions = list(dict.fromkeys([
+            *("target_structure_prediction" for _ in [0] if context.predicted_structure_required),
+            *blueprint.preferred_actions,
+            *blueprint.future_actions,
+        ]))
+        pipeline = [
+            self._action_from_blueprint(action, context, blueprint, step_number)
+            for step_number, action in enumerate(actions, 1)
+        ]
+        target_label = f"{context.target_name}({context.gene_symbol or context.uniprot_id})"
+        evidence = context.evidence_refs[:4]
+        status, missing = self._execution_status_for(pipeline)
+        coverage = context.selectivity_constraints[:2] or [context.user_query[:160] if context.user_query else "按靶点调研证据设计筛选约束"]
+        return {
+            "strategy_id": f"{(context.gene_symbol or 'TARGET').replace('-', '').upper()}_{blueprint.blueprint_id}_{index:02d}",
+            "strategy_name": f"{target_label} {blueprint.strategy_name}",
+            "strategy_tagline": blueprint.problem_focus,
+            "approach_category": blueprint.approach_category,
+            "rationale": (
+                f"{blueprint.rationale_hint} 靶点上下文显示 target_class={context.target_class}, "
+                f"pocket_type={context.pocket_type}, rule_category={context.rule_category}, "
+                f"结构证据={context.best_pdb_id or '无明确共晶结构'}。"
+            ),
+            "target_profile": {
+                "target_class": context.target_class,
+                "pocket_type": context.pocket_type,
+                "pocket_volume_approx": "large" if context.rule_category == "bRo5" else "medium",
+                "pocket_polarity": context.pocket_polarity,
+                "recommended_mw_range": context.mw_range,
+                "recommended_logp_range": context.logp_range,
+                "has_experimental_structure": context.has_experimental_structure,
+                "has_known_active_ligands": context.has_known_active_ligands,
+                "rule_category": context.rule_category,
+            },
+            "pipeline": pipeline,
+            "survival_estimate": self._survival_for(blueprint, status),
+            "contingency_plan": {
+                "trigger": "survivors < 10 或关键证据缺失",
+                "actions": ["回退到宽松阈值", "保留更多骨架进入人工复核", "等待缺失工具接入后重跑对应策略"],
+            },
+            "strengths": [blueprint.problem_focus, "策略证据和能力缺口可追溯"],
+            "weaknesses": ["依赖当前调研证据质量"] + (["含暂未接入工具，不能直接执行完整路线"] if missing else []),
+            "estimated_runtime_category": "days" if status == "currently_executable" else "future",
+            "knowledge_dependencies": evidence,
+            "applicability_conditions": {
+                "requires_structure": "molecular_docking" in actions or "target_structure_prediction" in actions,
+                "requires_ligands": blueprint.requires_ligands,
+                "min_library_size": "87K",
+                "suitable_target_types": [context.target_class, context.pocket_type],
+            },
+            "problem_focus": blueprint.problem_focus,
+            "target_evidence_refs": evidence,
+            "user_requirement_coverage": coverage,
+            "diversity_axis": blueprint.diversity_axis,
+            "risk_level": blueprint.risk_level,
+            "why_this_strategy_fits_target": (
+                f"该策略针对 {context.target_class}/{context.pocket_type} 场景设计，"
+                f"采用 {context.rule_category} 与用户约束共同限定筛选路线。"
+            ),
+            "execution_status": status,
+            "required_capabilities": actions,
+            "missing_capabilities": missing,
+        }
+
+    @staticmethod
+    def _action_from_blueprint(action: str, context: StrategyContext,
+                               blueprint: StrategyBlueprint, step_number: int) -> dict:
+        names = {
+            "target_structure_prediction": "预测并验证靶点结构",
+            "library_preparation": "分子库标准化与构象准备",
+            "protein_preparation": "蛋白结构准备",
+            "binding_site_detection": "证据驱动口袋定义",
+            "physicochemical_filtering": "靶点适配理化过滤",
+            "molecular_docking": "口袋导向分子对接",
+            "interaction_analysis": "关键相互作用指纹分析",
+            "diversity_selection": "骨架多样性保护",
+            "admet_filtering": "ADMET风险过滤",
+            "molecular_dynamics": "候选姿态稳定性MD验证",
+            "similarity_screening": "已知配体相似性筛选",
+            "pharmacophore_screening": "药效团约束筛选",
+            "shape_matching": "三维形状匹配",
+            "fragment_screening": "片段探索筛选",
+            "consensus_scoring": "多评分共识排序",
+            "final_ranking": "综合证据排序",
+            "report_generation": "可追溯报告生成",
+        }
+        params: dict[str, Any] = {}
+        if action == "physicochemical_filtering":
+            params = {"mw_range": context.mw_range, "logp_range": context.logp_range,
+                      "rule_category": context.rule_category, "pains_filter": True}
+        elif action == "molecular_docking":
+            params = {"exhaustiveness": 12 if blueprint.risk_level == "low" else 6,
+                      "num_modes": 5, "pocket_type": context.pocket_type}
+        elif action == "interaction_analysis":
+            params = {"prioritize_selectivity": bool(context.selectivity_constraints),
+                      "key_constraints": context.selectivity_constraints[:5]}
+        elif action in FUTURE_ACTION_CAPABILITIES:
+            params = {"capability_gap": FUTURE_ACTION_CAPABILITIES[action]}
+        return {
+            "step_number": step_number,
+            "action_type": action,
+            "action_name": names.get(action, action),
+            "description": (
+                f"{names.get(action, action)}：服务于“{blueprint.problem_focus}”。"
+                f"参数依据 {context.target_class}/{context.pocket_type} 和证据 {', '.join(context.evidence_refs[:2])}。"
+            ),
+            "input": {"type": "screening_context", "size": "task_bound", "format": "JSON/SMI/PDB"},
+            "output": {"type": "screening_artifact", "size": "stage_dependent", "format": "CSV/SDF/JSON"},
+            "parameters": params,
+            "quality_criteria": "输出必须保留 source_id、证据来源和失败原因",
+            "cardinality_estimate": "stage-dependent",
+            "computational_cost": "high" if action in {"molecular_docking", "molecular_dynamics", "target_structure_prediction"} else "medium",
+            "requires": ["screening_library"] if action in {"library_preparation", "physicochemical_filtering", "similarity_screening"} else ["target_structure", "screening_library"],
+        }
+
+    @staticmethod
+    def _execution_status_for(pipeline: list[dict]) -> tuple[str, list[str]]:
+        missing = []
+        for step in pipeline:
+            action = str(step.get("action_type", ""))
+            if action in FUTURE_ACTION_CAPABILITIES:
+                missing.append(f"{action}: {FUTURE_ACTION_CAPABILITIES[action]}")
+            elif action not in EXECUTABLE_STRATEGY_ACTIONS:
+                missing.append(f"{action}: no registered production adapter")
+        missing = list(dict.fromkeys(missing))
+        if not missing:
+            return "currently_executable", []
+        executable_count = sum(str(step.get("action_type", "")) in EXECUTABLE_STRATEGY_ACTIONS for step in pipeline)
+        if executable_count >= 3:
+            return "partially_executable", missing
+        return "future_capability_required", missing
+
+    @staticmethod
+    def _survival_for(blueprint: StrategyBlueprint, status: str) -> str:
+        if blueprint.risk_level == "low":
+            return "87K→40K→5K→500→20"
+        if status == "future_capability_required":
+            return "待缺失能力接入后定义可执行压缩漏斗"
+        return "87K→60K→10K→1K→20"
+
+    def _quality_gate_strategies(self, strategies: list[dict], context: StrategyContext,
+                                 blueprints: list[StrategyBlueprint]) -> list[dict]:
+        cleaned: list[dict] = []
+        seen_axes: set[str] = set()
+        by_blueprint = {bp.diversity_axis: bp for bp in blueprints}
+        for raw in strategies:
+            item = self._normalize_strategy_metadata(raw, context)
+            axis = item.get("diversity_axis") or item.get("approach_category") or item.get("strategy_name", "")
+            if axis in seen_axes:
+                continue
+            seen_axes.add(axis)
+            cleaned.append(item)
+        for bp in blueprints:
+            if len(cleaned) >= 8:
+                break
+            if bp.diversity_axis not in seen_axes:
+                cleaned.append(self._strategy_from_blueprint(context, bp, len(cleaned) + 1))
+                seen_axes.add(bp.diversity_axis)
+        return cleaned[:8]
+
+    def _normalize_strategy_metadata(self, strategy: dict, context: StrategyContext) -> dict:
+        item = dict(strategy)
+        pipeline = item.get("pipeline") if isinstance(item.get("pipeline"), list) else item.get("pipeline_steps", [])
+        item["pipeline"] = pipeline if isinstance(pipeline, list) else []
+        status, missing = self._execution_status_for(item["pipeline"])
+        item.setdefault("problem_focus", item.get("strategy_tagline") or item.get("rationale", "")[:120] or "解决靶点筛选任务")
+        item.setdefault("target_evidence_refs", context.evidence_refs[:4])
+        item.setdefault("user_requirement_coverage", context.selectivity_constraints[:2] or [context.user_query[:160] if context.user_query else "无显式用户约束，按靶点证据设计"])
+        item.setdefault("diversity_axis", item.get("approach_category") or "strategy_axis")
+        item.setdefault("risk_level", "medium")
+        item.setdefault("why_this_strategy_fits_target", f"匹配 {context.target_class}/{context.pocket_type} 与 {context.rule_category} 约束")
+        item["execution_status"] = item.get("execution_status") if item.get("missing_capabilities") else status
+        item["missing_capabilities"] = list(dict.fromkeys([*item.get("missing_capabilities", []), *missing]))
+        if item["missing_capabilities"] and item["execution_status"] == "currently_executable":
+            item["execution_status"] = status
+        item["required_capabilities"] = list(dict.fromkeys(
+            item.get("required_capabilities", []) or [str(step.get("action_type", "")) for step in item["pipeline"] if step.get("action_type")]
+        ))
+        item.setdefault("target_profile", {})
+        item["target_profile"] = {
+            **{
+                "target_class": context.target_class, "pocket_type": context.pocket_type,
+                "recommended_mw_range": context.mw_range, "recommended_logp_range": context.logp_range,
+                "has_experimental_structure": context.has_experimental_structure,
+                "has_known_active_ligands": context.has_known_active_ligands,
+                "rule_category": context.rule_category,
+            },
+            **item.get("target_profile", {}),
+        }
+        return item
 
     def _build_strategy_prompt(self, target_name, target_gene, target_uniprot, report_text, user_query="", prior_knowledge=""):
         metrics_block = self._build_metrics_block(report_text)
@@ -309,12 +846,14 @@ class StrategyGeneratorAgent:
 
 第一版系统只支持有明确结合口袋的非共价小分子SBDD。action_type **只能**从以下已注册能力中选择:
 library_preparation, protein_preparation, binding_site_detection,
+target_structure_prediction,
 physicochemical_filtering, diversity_selection, molecular_docking,
 interaction_analysis, admet_filtering, molecular_dynamics, final_ranking,
 report_generation
 
 严禁输出药效团、形状、共价、FEP、片段生长、生成式设计、人工目视检查等未注册步骤；
 策略必须能在上述能力集合内完整执行。molecular_dynamics只能用于最终少量候选，不能用于大库粗筛。
+🚨 禁止使用 input_validation 和 target_structure_acquisition！后者仅指RCSB实验结构下载；无共晶结构时允许 target_structure_prediction。
 
 {{
   "strategies": [{{
@@ -371,6 +910,8 @@ report_generation
         report_text, metrics_block, pdb_note,
         constraint_block, prior_block,
         existing_summaries=None, strategy_index=1,
+        blueprint: StrategyBlueprint | None = None,
+        context: StrategyContext | None = None,
     ):
         """构建单策略 prompt — LLM 只需输出 1 个完整策略，独占 8K token 配额。"""
         existing_note = ""
@@ -381,17 +922,37 @@ report_generation
 
 你的新策略必须与以上 {len(existing_summaries)} 个已有策略**明显不同**：不同 approach_category、不同 pipeline 流程、不同风险偏好!
 """
+        blueprint_note = ""
+        if blueprint is not None:
+            blueprint_note = f"""## 本策略蓝图（必须遵守）
+{blueprint.model_dump_json(indent=2)}
+
+你只能围绕这个蓝图生成一个策略。可以补充科学细节，但不能把它改成另一个策略族。
+"""
+        context_note = ""
+        if context is not None:
+            context_note = f"""## 结构化靶点上下文
+{context.model_dump_json(indent=2)}
+
+字段 evidence_levels 标记证据等级。若为 assumed/unknown，必须在 rationale 中说明不确定性。
+"""
         return f"""为靶点 {target_name} ({target_gene}, UniProt:{target_uniprot}) 设计第{strategy_index}个虚拟筛选策略。只需输出 1 个完整策略对象，不要 strategies 数组。
 
-{constraint_block}{prior_block}{existing_note}{metrics_block}{pdb_note}
+{constraint_block}{prior_block}{existing_note}{blueprint_note}{context_note}{metrics_block}{pdb_note}
 ## 调研报告参考
 {report_text[:4000]}
 
 ## 设计要求
 - 基于靶点口袋和已知配体数据，description 简洁 (50-150字), rationale (100-200字)
 - 与已有策略明显差异化：不同方法组合、不同过滤顺序、不同风险偏好
+- 必须填写 problem_focus、target_evidence_refs、user_requirement_coverage、diversity_axis、risk_level、why_this_strategy_fits_target
+- 暂未接入工具允许写入 pipeline，但 execution_status 不能是 currently_executable，missing_capabilities 必须写清楚
 
-action_type 只能从以下选择: library_preparation, protein_preparation, binding_site_detection, physicochemical_filtering, diversity_selection, molecular_docking, interaction_analysis, admet_filtering, molecular_dynamics, final_ranking, report_generation
+action_type 可从以下选择:
+当前可执行/接近可执行: library_preparation, protein_preparation, binding_site_detection, physicochemical_filtering, molecular_docking, interaction_analysis, final_ranking, report_generation
+未来能力路线: target_structure_prediction, admet_filtering, molecular_dynamics, similarity_screening, pharmacophore_screening, shape_matching, fragment_screening, consensus_scoring, machine_learning_scoring
+
+🚨 禁止使用 input_validation 和 target_structure_acquisition！无共晶结构时允许 target_structure_prediction。
 
 ## 输出格式（单策略对象，不含 strategies 数组！）
 {{
@@ -434,7 +995,16 @@ action_type 只能从以下选择: library_preparation, protein_preparation, bin
     "requires_ligands": false,
     "min_library_size": "100K",
     "suitable_target_types": []
-  }}
+  }},
+  "problem_focus": "要解决的核心问题",
+  "target_evidence_refs": ["verified_structure:xxxx", "chembl_activities:20"],
+  "user_requirement_coverage": ["如何覆盖用户需求或为什么无显式需求"],
+  "diversity_axis": "必须等于或贴近蓝图 diversity_axis",
+  "risk_level": "low / medium / high",
+  "why_this_strategy_fits_target": "解释它为什么适配该靶点和口袋特征",
+  "execution_status": "currently_executable / partially_executable / future_capability_required",
+  "required_capabilities": ["molecular_docking"],
+  "missing_capabilities": []
 }}
 
 输出纯JSON，不要 markdown 代码块，不要外层 strategies 数组！只输出一个策略对象。
@@ -596,6 +1166,10 @@ requires 是前置资源描述，不是步骤编号！"""
             result = []
             fail_count = 0
             for i, item in enumerate(items):
+                # 去除 LLM 不应生成的步骤（input_validation, target_structure_acquisition — 系统自动注入）
+                if "pipeline" in item:
+                    item["pipeline"] = [s for s in item["pipeline"]
+                                        if str(s.get("action_type", "")) not in {"input_validation", "target_structure_acquisition"}]
                 # 归一化 requires 字段：LLM 常错误输出整数或对象，统一转为字符串
                 for step in item.get("pipeline", []):
                     raw_req = step.get("requires", [])
@@ -719,6 +1293,11 @@ requires 是前置资源描述，不是步骤编号！"""
 
     def _fallback(self, target_name, target_gene):
         """紧急 fallback — 当所有 LLM 调用失败时的基础策略模板 (v4 Action格式)。"""
+        context = StrategyContext(target_name=target_name or "Unknown target",
+                                  gene_symbol=target_gene or "",
+                                  user_query=f"为{target_name}设计虚拟筛选策略")
+        return {"strategies": self._fallback_from_context(context),
+                "generation_rationale": f"Fallback: {target_name}({target_gene}) 8个自适应策略蓝图"}
         T, G = target_name, target_gene
         default_pipeline = [
             {"step_number":1,"action_type":"physicochemical_filtering","action_name":"类药性预过滤",

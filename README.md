@@ -87,6 +87,15 @@ autovs-tools-mcp
 
 MCP 只暴露固定工具：能力发现、健康检查、工作流校验、步骤提交、作业查询、产物查询、日志和显式确认取消。它不接受任意 shell 命令。
 
+Web 会先调用 `POST /api/targets/resolve`，将自然语言解析为结构化筛选要求并通过 UniProt 验证靶点身份。高置信度结果自动继续；低置信度结果要求用户从候选 UniProt 条目中确认。任务内的 `research.json` 使用 v2 schema，保存身份指纹、各 API 状态、结构准备度和证据缺口。没有实验共晶结构时调研仍成功，但策略会要求 `target_structure_prediction`；在 AlphaFold/Boltz 适配器接入前，该路线会返回明确的 capability gap。
+
+真实 API 冒烟检查（不属于默认测试集）：
+
+```bash
+python scripts/smoke_target_research.py
+python scripts/smoke_target_research.py --full
+```
+
 ## WorkflowPlan v1
 
 策略生成器和进化器只能输出已注册 action。执行前统一转换为严格的 `WorkflowPlan 1.0`：

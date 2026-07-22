@@ -18,11 +18,14 @@ if _ENV_PATH.exists():
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from autovs.pipeline import PipelineService
 from autovs.library import SmiFormatError
 from autovs.schemas import PocketSpec, TaskRequest
 from autovs.security import ensure_within
+from src.agents.target_scout import TargetScoutAgent
+from src.agents.target_research.models import TargetIdentity, TargetIntent
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -39,8 +42,10 @@ async def cache_policy(request: Request, call_next):
     if path == "/" or path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
     elif path.startswith("/static/"):
-        # 版本化静态资源允许短期缓存
-        response.headers["Cache-Control"] = "public, max-age=300"
+        if request.url.query:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
 
@@ -67,18 +72,33 @@ def list_tasks(limit: int = 20):
     return {"tasks": service.store.list_tasks(limit)}
 
 
+class TargetResolveRequest(BaseModel):
+    query: str = Field(min_length=3, max_length=5000)
+    target_hint: str = Field(default="", max_length=200)
+    selected_accession: str = Field(default="", max_length=20)
+
+
+@app.post("/api/targets/resolve")
+def resolve_target(payload: TargetResolveRequest):
+    result = TargetScoutAgent().resolve_target(
+        payload.query, target_hint=payload.target_hint,
+        selected_accession=payload.selected_accession,
+    )
+    if result.get("status") == "invalid_selection":
+        raise HTTPException(422, result)
+    return result
+
+
 @app.post("/api/tasks")
 async def create_task(
     request: Request,
     query: str = Form(...),
     target_gene: str = Form(""),
+    target_uniprot_id: str = Form(""),
     center: str = Form(""), size: str = Form("24,24,24"), key_residues: str = Form(""),
     ligand_id: str = Form(""),
     ph: float = Form(7.4), cpu_only: bool = Form(False), baseline: bool = Form(False),
 ):
-    # 兼容前端拆分输入：如前端传了 target_gene 且 query 未含前缀，自动拼接
-    if target_gene.strip() and not query.startswith("靶点基因:"):
-        query = f"靶点基因: {target_gene.strip()}。{query.strip()}"
     if len(query.strip()) < 10:
         raise HTTPException(400, "任务描述至少10个字符")
     # 手动从 multipart form 中提取可选文件字段，
@@ -112,6 +132,16 @@ async def create_task(
         size_value = tuple(float(x) for x in size.split(","))
         if center_value is not None and len(center_value) != 3 or len(size_value) != 3:
             raise ValueError("center and size require three comma-separated numbers")
+        verified_identity = None
+        screening_intent = None
+        if target_uniprot_id.strip() and not baseline:
+            resolution = TargetScoutAgent().resolve_target(
+                query, target_hint=target_gene.strip(), selected_accession=target_uniprot_id.strip(),
+            )
+            if resolution.get("status") != "resolved":
+                raise ValueError(resolution.get("reason", "靶点身份验证失败"))
+            verified_identity = TargetIdentity.model_validate(resolution["identity"])
+            screening_intent = TargetIntent.model_validate(resolution["intent"])
         request = TaskRequest(query=query, protein_path=str(protein_path) if protein_path else None,
                               library_path=str(library_path) if library_path else None,
                               protein_original_name=protein.filename if protein else None,
@@ -119,7 +149,8 @@ async def create_task(
                               pocket=PocketSpec(center=center_value, size=size_value,
                                                 key_residues=[x.strip() for x in key_residues.split(",") if x.strip()],
                                                 cocrystal_ligand=ligand_id.strip() or None),
-                              ph=ph, cpu_only=cpu_only)
+                              ph=ph, cpu_only=cpu_only,
+                              target_identity=verified_identity, screening_intent=screening_intent)
         task_id = service.submit(request, use_llm_planning=not baseline)
     except SmiFormatError as exc:
         raise HTTPException(422, exc.as_dict()) from exc

@@ -103,17 +103,13 @@ async function startPipeline(event) {
   event.preventDefault();
   const targetGene = document.getElementById('targetGeneInput').value.trim();
   const requirements = document.getElementById('queryInput').value.trim();
-  const query = `靶点基因: ${targetGene}。${requirements}`;
+  const query = requirements;
   const protein = document.getElementById('proteinInput').files[0];
   const library = document.getElementById('libraryInput').files[0];
   const errorBox = document.getElementById('formError');
   errorBox.hidden = true;
-  if (!targetGene || targetGene.length < 1) {
-    showFormError('请填写靶点基因英文缩写（如 PTGER2、EP2、BCL2）。');
-    return;
-  }
-  if (requirements.length < 5) {
-    showFormError('请至少填写 5 个字符的筛选要求。');
+  if (requirements.length < 10) {
+    showFormError('请至少填写 10 个字符的自然语言筛选任务。');
     return;
   }
   if (protein && !protein.name.toLowerCase().endsWith('.pdb')) {
@@ -141,6 +137,24 @@ async function startPipeline(event) {
   form.append('baseline', document.getElementById('baselineMode').checked ? 'true' : 'false');
   setSubmitState(true);
   try {
+    let selectedAccession = '';
+    if (!document.getElementById('baselineMode').checked) {
+      const resolveResponse = await fetch('/api/targets/resolve', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query, target_hint: targetGene}),
+      });
+      const resolution = await resolveResponse.json();
+      if (!resolveResponse.ok) throw new Error(formatApiError(resolution.detail || resolution));
+      if (resolution.status === 'unsupported') throw new Error(resolution.reason || '当前不支持该类靶点');
+      if (resolution.status === 'needs_confirmation') {
+        selectedAccession = await chooseTargetCandidate(resolution.candidates || []);
+        if (!selectedAccession) throw new Error('已取消靶点身份确认');
+      } else if (resolution.status === 'resolved') {
+        selectedAccession = resolution.identity?.uniprot_accession || '';
+      }
+      if (!selectedAccession) throw new Error(resolution.reason || '未能验证靶点身份');
+      form.append('target_uniprot_id', selectedAccession);
+    }
     const response = await fetch('/api/tasks', {method: 'POST', body: form});
     const data = await response.json();
     if (!response.ok) throw new Error(formatApiError(data.detail));
@@ -153,6 +167,25 @@ async function startPipeline(event) {
   } finally {
     setSubmitState(false);
   }
+}
+
+function chooseTargetCandidate(candidates) {
+  if (!candidates.length) return Promise.reject(new Error('未找到可确认的 UniProt 靶点候选'));
+  const dialog = document.getElementById('targetDialog');
+  const container = document.getElementById('targetCandidates');
+  container.innerHTML = candidates.map(item => `
+    <button type="button" class="target-candidate" data-accession="${escapeHtml(item.uniprot_accession)}">
+      <span><strong>${escapeHtml(item.canonical_gene_symbol || item.protein_name)}</strong><small>${escapeHtml(item.protein_name)}</small></span>
+      <span><code>${escapeHtml(item.uniprot_accession)}</code><small>${escapeHtml(item.organism_name)}</small></span>
+    </button>`).join('');
+  return new Promise(resolve => {
+    const finish = value => { dialog.close(); resolve(value); };
+    container.querySelectorAll('.target-candidate').forEach(button => {
+      button.addEventListener('click', () => finish(button.dataset.accession), {once: true});
+    });
+    dialog.addEventListener('close', () => resolve(''), {once: true});
+    dialog.showModal();
+  });
 }
 
 async function openTask(taskId, {quiet = false} = {}) {

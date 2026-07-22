@@ -11,6 +11,7 @@ from autovs.schemas import (
 
 
 ALIASES = {
+    "target_structure_prediction": ActionType.TARGET_STRUCTURE_PREDICTION,
     "library_preparation": ActionType.MOLECULE_STANDARDIZATION,
     "physicochemical_filtering": ActionType.PHYSICOCHEMICAL_FILTERING,
     "protein_preparation": ActionType.PROTEIN_PREPARATION,
@@ -120,6 +121,11 @@ def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest 
             action = ALIASES[raw_action] if raw_action in ALIASES else ActionType(raw_action)
         except ValueError as exc:
             raise ValueError(f"unknown action_type: {raw_action}") from exc
+        if action == ActionType.TARGET_STRUCTURE_PREDICTION:
+            raise ValueError(
+                "capability gap: target_structure_prediction requires an AlphaFold/Boltz adapter, "
+                "which is not configured yet"
+            )
         step_id = _slug(str(raw.get("step_id") or raw.get("id") or f"strategy-{index}"), f"strategy-{index}")
         params = raw.get("parameters") if isinstance(raw.get("parameters"), dict) else raw.get("params", {})
         executor = "python"
@@ -140,9 +146,12 @@ def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest 
         ))
         previous = step_id
 
-    # Pocket resolution is a deterministic scientific preflight owned by PipelineService.
+    # Pocket resolution, structure acquisition, and input validation are service-owned.
     # LLM-authored copies (and their coordinates/parameters) are never executable.
-    converted = [step for step in converted if step.action_type != ActionType.POCKET_DEFINITION]
+    converted = [step for step in converted
+                 if step.action_type not in {ActionType.POCKET_DEFINITION,
+                                              ActionType.TARGET_STRUCTURE_ACQUISITION,
+                                              ActionType.INPUT_VALIDATION}]
 
     mandatory_prefix = [WorkflowStep(
         step_id="input-validation", action_type=ActionType.INPUT_VALIDATION,
@@ -188,8 +197,20 @@ def choose_executable_strategy(ranked_names: list[str], strategies: list[dict], 
     rejected: list[dict] = []
     candidates = ranked_names + [name for name in by_name if name not in ranked_names]
     for name in candidates:
+        strategy = by_name.get(name) or {}
+        if strategy.get("execution_status") in {"partially_executable", "future_capability_required"}:
+            rejected.append({
+                "strategy_name": name,
+                "reason": "strategy requires capabilities that are not executable in the current pipeline",
+                "execution_status": strategy.get("execution_status"),
+                "missing_capabilities": strategy.get("missing_capabilities", []),
+            })
+    candidates.sort(key=lambda name: 0 if by_name.get(name, {}).get("execution_status", "currently_executable") == "currently_executable" else 1)
+    for name in candidates:
         strategy = by_name.get(name)
         if not strategy:
+            continue
+        if strategy.get("execution_status") in {"partially_executable", "future_capability_required"}:
             continue
         try:
             return strategy, compile_strategy(strategy, input_manifest=input_manifest), rejected

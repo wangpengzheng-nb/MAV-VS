@@ -20,12 +20,19 @@ EVOLVER_SYSTEM_PROMPT = """\
 5. 第一版只允许以下action_type: library_preparation, protein_preparation,
    binding_site_detection, physicochemical_filtering, diversity_selection,
    molecular_docking, interaction_analysis, admet_filtering,
-   molecular_dynamics, final_ranking, report_generation
-6. 禁止插入药效团、形状、共价、FEP、片段生长、生成式设计或人工目视检查步骤
+   molecular_dynamics, final_ranking, report_generation,
+   similarity_screening, pharmacophore_screening, shape_matching,
+   fragment_screening, consensus_scoring, target_structure_prediction
+6. 暂未接入工具可以保留为科学路线，但必须保持 execution_status 和 missing_capabilities；禁止把 future capability 伪装成 currently_executable
+7. 禁止插入共价、FEP、生成式设计或人工目视检查步骤，除非诊断明确要求并且标注为 future capability
 
 ## 输出JSON格式
 {
   "strategy_name": "xxx (v2 进化版)",
+  "problem_focus": "保留或修复后的核心问题",
+  "diversity_axis": "保留原多样性轴",
+  "execution_status": "currently_executable / partially_executable / future_capability_required",
+  "missing_capabilities": [],
   "changes": [
     {
       "change_id": "chg-1",
@@ -149,6 +156,15 @@ class StrategyEvolver:
                     st["step_id"] = f"a-{_uuid.uuid4().hex[:8]}"
 
             parsed.setdefault("strategy_name", strategy.get("strategy_name","?")+" (v2 进化版)")
+            for key in (
+                "problem_focus", "target_evidence_refs", "user_requirement_coverage",
+                "diversity_axis", "risk_level", "why_this_strategy_fits_target",
+                "execution_status", "required_capabilities", "missing_capabilities",
+                "target_profile", "approach_category", "strategy_tagline",
+                "applicability_conditions",
+            ):
+                if key not in parsed and key in strategy:
+                    parsed[key] = strategy[key]
             return parsed
 
         except Exception as e:
@@ -197,6 +213,11 @@ class StrategyEvolver:
         lines = [f"## 策略底稿\n名称: {s.get('strategy_name','?')}\n"
                  f"方法: {s.get('approach_category','?')}\n"
                  f"标签: {s.get('strategy_tagline','')}\n"
+                 f"问题焦点: {s.get('problem_focus','')}\n"
+                 f"多样性轴: {s.get('diversity_axis','')}\n"
+                 f"执行状态: {s.get('execution_status','')}\n"
+                 f"缺失能力: {s.get('missing_capabilities', [])}\n"
+                 f"证据引用: {s.get('target_evidence_refs', [])}\n"
                  f"存活: {s.get('survival_estimate','?')}\n"]
         for st in s.get("pipeline", s.get("pipeline_steps", [])):
             sid = st.get("step_id", f"step_{st.get('step_number','?')}")

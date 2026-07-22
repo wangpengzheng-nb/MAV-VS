@@ -11,18 +11,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from autovs.capabilities import health_report, list_capabilities
+from autovs.capabilities import list_capabilities
 from autovs.compiler import choose_executable_strategy, compile_strategy
 from autovs.config import Settings, load_settings
 from autovs.db import StateStore
-from autovs.reporting import generate_failure_report, generate_report
-from autovs.library import migrate_legacy_library, validate_smi_structure, verify_default_library
+from autovs.reporting import generate_failure_report
+from autovs.dag import (
+    NORMALIZED_LIBRARY, POCKET_RESOLUTION as POCKET_RESOLUTION_KEY,
+    SCREENING_LIBRARY, TARGET_STRUCTURE, TaskPaused as DAGTaskPaused,
+    execute_workflow_plan,
+)
+from autovs.library import (
+    migrate_legacy_library, validate_smi_structure,
+    verify_default_library,
+)
 from autovs.schemas import (
-    ActionType, InputManifest, JobStatus, LibraryAsset, PocketResolution,
-    TargetAsset, TaskRequest, WorkflowPlan, WorkflowStep,
+    ActionType, InputManifest, JobStatus, LibraryAsset, TargetAsset,
+    TaskRequest, WorkflowPlan, WorkflowStep,
 )
 from autovs.security import sha256_file
 from autovs.tool_manager import ToolManager
+from src.agents.target_research.models import TargetIdentity, TargetIntent
 
 
 class _TaskPaused(Exception):
@@ -51,6 +60,7 @@ PIPELINE_PHASES = [
 ACTION_PHASE = {
     ActionType.INPUT_VALIDATION: "input_validation",
     ActionType.TARGET_STRUCTURE_ACQUISITION: "target_structure_acquisition",
+    ActionType.TARGET_STRUCTURE_PREDICTION: "target_structure_acquisition",
     ActionType.POCKET_DEFINITION: "pocket_definition",
     ActionType.MOLECULE_STANDARDIZATION: "molecule_standardization",
     ActionType.CONFORMER_GENERATION: "molecule_standardization",
@@ -193,7 +203,10 @@ class PipelineService:
             if check["status"] != "available":
                 raise ValueError(str(check.get("reason", "default library is unavailable")))
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        fingerprint = hashlib.sha256(f"{request.query}|{source_protein}|{source_library}".encode()).hexdigest()[:8]
+        identity_key = request.target_identity.identity_fingerprint if request.target_identity else "unresolved"
+        fingerprint = hashlib.sha256(
+            f"{request.query}|{identity_key}|{source_protein}|{source_library}".encode()
+        ).hexdigest()[:8]
         task_dir = self.settings.task_root / f"task_{stamp}_{fingerprint}"
         inputs = task_dir / "inputs"; inputs.mkdir(parents=True, exist_ok=False)
         protein = None
@@ -209,7 +222,7 @@ class PipelineService:
         if not user_library:
             warnings.append("未上传分子库：本任务强制使用内置 PocketXMol curated 87K 分子库。")
         if protein is None:
-            warnings.append("未上传蛋白结构：系统将在调研与策略进化后从 RCSB 获取经过验证的实验共晶结构。")
+            warnings.append("未上传蛋白结构：系统将优先获取经过验证的实验共晶结构；若不存在则由策略阶段提出结构预测路线。")
         cfg = self.settings.library() if not user_library else {}
         manifest_path = task_dir / "input_manifest.json"
         manifest = InputManifest(
@@ -225,6 +238,8 @@ class PipelineService:
                 original_filename=request.protein_original_name or (source_protein.name if source_protein else None),
             ),
             expert_pocket=request.pocket, warnings=warnings,
+            target_identity=request.target_identity,
+            screening_intent=request.screening_intent,
             constraint_summary=[
                 "screening_library is immutable and may not be replaced by an external library",
                 "uploaded target_structure is immutable" if protein else "target_structure must come from verified RCSB holo candidates",
@@ -298,6 +313,28 @@ class PipelineService:
 
             _check_pause()
 
+            readiness = planning.get("research", {}).get("structure_readiness", {})
+            if (use_llm_planning and not request.protein_path
+                    and readiness.get("predicted_structure_required")):
+                gap = {
+                    "action_type": ActionType.TARGET_STRUCTURE_PREDICTION.value,
+                    "availability": "unavailable",
+                    "reason": "AlphaFold/Boltz structure prediction adapter is not configured yet",
+                    "recommendations": readiness.get("acquisition_recommendations", []),
+                }
+                gap_path = task_dir / "structure_capability_gap.json"
+                gap_path.write_text(json.dumps(gap, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._index_artifact(task_id, "structure_capability_gap", gap_path)
+                self.store.update_progress(
+                    task_id, "strategy_selection", JobStatus.FAILED,
+                    message="策略需要预测靶结构，但 AlphaFold/Boltz 工具尚未接入",
+                    error=gap["reason"], metadata=gap,
+                )
+                raise RuntimeError(
+                    "capability gap: target_structure_prediction is required because no verified "
+                    "experimental holo structure is available; configure an AlphaFold/Boltz adapter"
+                )
+
             # ── 阶段3: 策略选择 ──
             plan_path = task_dir / "workflow_plan.json"
             if _phase_done("strategy_selection") and plan_path.is_file():
@@ -328,27 +365,49 @@ class PipelineService:
 
             _check_pause()
 
-            # ── 阶段4: 靶结构获取 + 口袋解析 ──
-            protein_path, pocket_resolution = self._resolve_target_and_pocket(
-                task_id, request, task_dir, planning, plan,
-            )
-            planning["pocket_resolution"] = pocket_resolution.model_dump(mode="json")
-
             _check_pause()
 
-            # ── 阶段5: 核心执行（对接、PLIP、排序、报告）──
-            result = self._execute_core(
-                task_id, request, plan, rejected, planning,
-                protein_path=protein_path, library_path=normalized_library,
+            # ── 阶段4-5: DAG 工作流执行 ──
+            # 构建 artifact_state，将所有步骤交给 DAG executor 按拓扑顺序执行。
+            artifact_state: dict[str, Any] = {
+                SCREENING_LIBRARY: normalized_library,
+                NORMALIZED_LIBRARY: normalized_library,
+                "_research_path": str(task_dir / "research.json") if (task_dir / "research.json").is_file() else "",
+                "_selected_strategy_id": plan.strategy_id,
+            }
+            if request.protein_path:
+                artifact_state[TARGET_STRUCTURE] = request.protein_path
+
+            result = execute_workflow_plan(
+                task_id, plan,
+                tools=self.tools,
+                artifact_state=artifact_state,
+                store=self.store,
+                task_dir=task_dir,
+                request=request,
+                planning=planning,
+                rejected_strategies=rejected,
+                update_progress=lambda phase_id, status, **kw: self.store.update_progress(
+                    task_id, phase_id, status, **kw,
+                ),
+                is_paused=lambda: self._is_paused(task_id),
             )
+            # Merge pocket resolution into planning metadata for downstream consumers.
+            if POCKET_RESOLUTION_KEY in artifact_state:
+                planning["pocket_resolution"] = artifact_state[POCKET_RESOLUTION_KEY]
             self.store.finish_pending_progress(task_id, message="未包含在本次可执行策略中")
-            self.store.update_task(task_id, JobStatus.SUCCEEDED, result=result)
+            if result.get("status") == "failed":
+                self.store.update_task(
+                    task_id, JobStatus.FAILED, result=result,
+                    error="workflow execution failed; see reports and progress for details",
+                )
+            else:
+                self.store.update_task(task_id, JobStatus.SUCCEEDED, result=result)
 
         except Exception as exc:
-            if self._is_paused(task_id):
-                # 暂停是正常行为，不记录错误
-                return
-            if type(exc).__name__ == "_TaskPaused":  # 内部暂停信号
+            if self._is_paused(task_id) or isinstance(exc, (DAGTaskPaused, _TaskPaused)):
+                # 暂停是正常行为，不记录错误；任务状态必须显式落库，供 Web 端续跑。
+                self.store.update_task(task_id, JobStatus.PAUSED)
                 return
             error = f"{type(exc).__name__}: {exc}"
             self.store.fail_running_progress(task_id, error=error)
@@ -385,19 +444,42 @@ class PipelineService:
             return False
 
         # ── 子阶段1: 靶点调研 ──
-        if _sub_phase_done("target_research"):
-            research_path = task_dir / "research.json"
-            research = json.loads(research_path.read_text(encoding="utf-8")) if research_path.is_file() else {}
-        else:
+        research_path = task_dir / "research.json"
+        research = {}
+        can_reuse = _sub_phase_done("target_research") and research_path.is_file()
+        if can_reuse:
+            research = json.loads(research_path.read_text(encoding="utf-8"))
+            expected_identity = request.target_identity.identity_fingerprint if request.target_identity else ""
+            actual_identity = (research.get("identity") or {}).get("identity_fingerprint", "")
+            can_reuse = (
+                research.get("research_version") == "2.0"
+                and research.get("_user_query") == request.query
+                and (not expected_identity or expected_identity == actual_identity)
+            )
+        if not can_reuse:
             self.store.update_progress(task_id, "target_research", JobStatus.RUNNING,
-                                       message="正在检索并验证靶点结构证据")
-            research = TargetScoutAgent().deep_research(request.query, fetch_structure_coordinates=False)
+                                       message="正在解析自然语言、消歧靶点并检索可追溯证据")
+            target_hint = (request.screening_intent.target_text if request.screening_intent else "")
+            selected_accession = (request.target_identity.uniprot_accession if request.target_identity else "")
+            raw_dir = task_dir / "research_raw"
+            research = TargetScoutAgent(snapshot_dir=raw_dir).deep_research(
+                request.query, fetch_structure_coordinates=False,
+                target_hint=target_hint, selected_accession=selected_accession,
+            )
             research["_user_query"] = request.query
-            research_path = task_dir / "research.json"
             research_path.write_text(json.dumps(research, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             self._index_artifact(task_id, "research", research_path)
+            for snapshot in sorted(raw_dir.glob("*.json")):
+                self._index_artifact(task_id, f"research_raw_{snapshot.stem}", snapshot)
+            self._lock_research_identity(task_id, request, manifest, research, task_dir)
             self.store.update_progress(task_id, "target_research", JobStatus.SUCCEEDED,
-                                       message="靶点调研已完成，证据已固化为 research.json")
+                                       message=f"靶点调研已完成：{research.get('gene_symbol')} / {research.get('target_uniprot_id')}",
+                                       metadata={
+                                           "research_status": research.get("status"),
+                                           "input_fingerprint": research.get("input_fingerprint"),
+                                           "identity_fingerprint": (research.get("identity") or {}).get("identity_fingerprint"),
+                                           "evidence_gaps": research.get("evidence_gaps", []),
+                                       })
         execution_context = self._execution_context(manifest)
         research["_execution_context"] = execution_context
         binding_rules = json.dumps(execution_context, ensure_ascii=False, separators=(",", ":"))
@@ -422,15 +504,17 @@ class PipelineService:
             raise RuntimeError("无可用策略：请检查策略生成日志")
 
         # ── 子阶段3: 全排列投票 ──
+        reviewer, aggregator = TournamentReviewer(), VoteAggregator()
         if _sub_phase_done("strategy_voting"):
             evaluation_path = task_dir / "evaluation.json"
             if evaluation_path.is_file():
                 evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+                for result in evaluation.get("results", []):
+                    aggregator.add_result(result)
             else:
                 evaluation = {"ranking": [{"strategy_name": s.get("strategy_name", "")} for s in strategies],
                               "diagnostics": {}}
         else:
-            reviewer, aggregator = TournamentReviewer(), VoteAggregator()
             match_count = len(list(itertools.combinations(strategies, 2)))
             self.store.update_progress(task_id, "strategy_voting", JobStatus.RUNNING,
                                        message=f"正在执行 {match_count} 组全排列对比")
@@ -475,65 +559,7 @@ class PipelineService:
             self.store.update_progress(task_id, "strategy_evolution", JobStatus.SUCCEEDED,
                                        message=f"已进化 {len(evolved)} 套策略")
         return {"ranked_names": [item["strategy_name"] for item in ranking], "evolved_strategies": evolved,
-                "execution_context": execution_context}
-
-    def _resolve_target_and_pocket(self, task_id: str, request: TaskRequest, task_dir: Path,
-                                   planning: dict, plan: WorkflowPlan) -> tuple[str, PocketResolution]:
-        research = {}
-        research_path = task_dir / "research.json"
-        if research_path.is_file():
-            research = json.loads(research_path.read_text(encoding="utf-8"))
-        candidates: list[tuple[str, str | None]] = []
-        if request.protein_path:
-            self.store.update_progress(task_id, "target_structure_acquisition", JobStatus.SKIPPED,
-                                       message="已锁定用户上传 PDB，禁止下载替代结构")
-            candidates = [(request.protein_path, None)]
-        else:
-            acquisition = self._run_step(
-                task_id,
-                WorkflowStep(step_id="target-structure-acquisition",
-                             action_type=ActionType.TARGET_STRUCTURE_ACQUISITION),
-                {"research_path": str(research_path), "limit": 5,
-                 "selected_strategy_id": plan.strategy_id},
-            )
-            metadata = {str(item["path"]): str(item.get("pdb_id") or "") for item in acquisition.get("candidates", [])}
-            candidates = [(str(path), metadata.get(str(path)) or None)
-                          for path in acquisition.get("candidate_structures", [])]
-        errors = []
-        for protein_path, pdb_id in candidates:
-            try:
-                resolution = self._resolve_pocket_preflight(
-                    task_id, request, task_dir, research, protein_path=protein_path,
-                )
-                self._update_target_manifest(request, protein_path, pdb_id)
-                manifest_path = Path(request.input_manifest_path or "")
-                if manifest_path.is_file():
-                    self._index_artifact(task_id, "input_manifest", manifest_path)
-                return protein_path, resolution
-            except Exception as exc:
-                errors.append({"pdb_id": pdb_id, "protein_path": protein_path, "reason": str(exc)})
-        raise ValueError(f"no downloaded/uploaded structure produced a validated pocket; rejected={errors}")
-
-    def _resolve_pocket_preflight(self, task_id: str, request: TaskRequest, task_dir: Path,
-                                  research: dict, *, protein_path: str) -> PocketResolution:
-        step = WorkflowStep(step_id="pocket-definition", action_type=ActionType.POCKET_DEFINITION,
-                            requires=["input-validation"])
-        inputs = {
-            "protein_path": protein_path,
-            "center": request.pocket.center,
-            "size": request.pocket.size,
-            "key_residues": request.pocket.key_residues,
-            "cocrystal_ligand": request.pocket.cocrystal_ligand,
-        }
-        research_path = task_dir / "research.json"
-        if research:
-            if not research_path.exists():
-                research_path.write_text(json.dumps(research, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-            inputs["research_path"] = str(research_path)
-        output = self._run_step(task_id, step, inputs)
-        resolution = PocketResolution.model_validate_json(Path(output["pocket"]).read_text(encoding="utf-8"))
-        (task_dir / "pocket_resolution.json").write_text(resolution.model_dump_json(indent=2), encoding="utf-8")
-        return resolution
+                "execution_context": execution_context, "research": research}
 
     def _read_input_manifest(self, request: TaskRequest) -> InputManifest:
         if not request.input_manifest_path:
@@ -567,6 +593,24 @@ class PipelineService:
             raise ValueError("task is missing InputManifest v1")
         Path(request.input_manifest_path).write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
+    def _lock_research_identity(self, task_id: str, request: TaskRequest,
+                                manifest: InputManifest, research: dict[str, Any],
+                                task_dir: Path) -> None:
+        """Persist the verified identity so resumes cannot silently change targets."""
+        identity = TargetIdentity.model_validate(research["identity"])
+        intent = TargetIntent.model_validate(research["intent"])
+        request.target_identity = identity
+        request.screening_intent = intent
+        updated_manifest = manifest.model_copy(update={
+            "target_identity": identity,
+            "screening_intent": intent,
+        })
+        self._write_input_manifest(request, updated_manifest)
+        (task_dir / "request.json").write_text(request.model_dump_json(indent=2), encoding="utf-8")
+        self.store.update_task_request(task_id, request.model_dump(mode="json"))
+        manifest.target_identity = identity
+        manifest.screening_intent = intent
+
     def _update_library_manifest(self, request: TaskRequest, validation: dict) -> InputManifest:
         manifest = self._read_input_manifest(request)
         asset = manifest.library_asset.model_copy(update={
@@ -576,17 +620,6 @@ class PipelineService:
             "quarantined_records": int(validation["quarantined_records"]),
         })
         updated = manifest.model_copy(update={"library_asset": asset})
-        self._write_input_manifest(request, updated)
-        return updated
-
-    def _update_target_manifest(self, request: TaskRequest, protein_path: str,
-                                pdb_id: str | None) -> InputManifest:
-        manifest = self._read_input_manifest(request)
-        asset = manifest.target_asset.model_copy(update={
-            "locked": True, "path": protein_path, "pdb_id": pdb_id,
-            "sha256": sha256_file(Path(protein_path)),
-        })
-        updated = manifest.model_copy(update={"target_asset": asset})
         self._write_input_manifest(request, updated)
         return updated
 
@@ -646,71 +679,6 @@ class PipelineService:
         except json.JSONDecodeError:
             return {}
 
-    def _execute_core(self, task_id: str, request: TaskRequest, plan: WorkflowPlan,
-                      rejected: list[dict], planning: dict, *, protein_path: str,
-                      library_path: str) -> dict:
-        task = self.store.get_task(task_id); assert task
-        task_dir = Path(task["task_dir"])
-        by_action: dict[ActionType, WorkflowStep] = {}
-        for step in plan.steps:
-            by_action.setdefault(step.action_type, step)
-
-        pocket_resolution = PocketResolution.model_validate(planning["pocket_resolution"])
-        pocket_data = pocket_resolution.selected_pocket
-        prep_step = by_action.get(ActionType.MOLECULE_STANDARDIZATION) or WorkflowStep(step_id="molecule-preparation", action_type=ActionType.MOLECULE_STANDARDIZATION)
-        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
-        prepared = self._run_step(task_id, prep_step, {"library_path": library_path})
-        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
-        protein = self._run_step(task_id, by_action.get(ActionType.PROTEIN_PREPARATION, WorkflowStep(step_id="protein-preparation", action_type=ActionType.PROTEIN_PREPARATION)),
-                                 {"protein_path": protein_path})
-
-        docking_step = by_action.get(ActionType.MOLECULAR_DOCKING)
-        if not docking_step:
-            raise RuntimeError("selected strategy does not contain molecular_docking")
-        if self._is_paused(task_id): self.store.update_task(task_id, JobStatus.PAUSED); raise _TaskPaused()
-        docking = self._run_step(task_id, docking_step, {
-            "receptor_pdbqt": protein["receptor_pdbqt"], "ligands_sdf": prepared["prepared_library"],
-            "manifest_csv": prepared["manifest"], "center": pocket_data.center, "size": pocket_data.size,
-        })
-        score_csv = Path(docking["scores_csv"])
-        pose_step = by_action.get(ActionType.POSE_EXTRACTION)
-        plip_step = by_action.get(ActionType.INTERACTION_ANALYSIS)
-        if pose_step and plip_step:
-            poses = self._run_step(task_id, pose_step, {"receptor_pdb": protein["receptor_pdb"],
-                                   "docked_poses": docking["docked_poses"], "engine": "smina", "pose_metric": "best_affinity"})
-            interactions = self._run_step(task_id, plip_step, {"complex_index": poses["complex_index"],
-                                          "key_residues": request.pocket.key_residues})
-            score_csv = _merge_score_csvs(score_csv, Path(interactions["plip_scores"]), task_dir / "combined_scores.csv")
-        ranking_step = by_action.get(ActionType.FINAL_RANKING) or WorkflowStep(step_id="final-ranking", action_type=ActionType.FINAL_RANKING)
-        ranked_output = self._run_step(task_id, ranking_step, {"scores_csv": str(score_csv)})
-        import csv
-        with Path(ranked_output["top_hits"]).open(encoding="utf-8-sig", newline="") as handle:
-            top_hits = list(csv.DictReader(handle))
-
-        # ADMET/PLIP/MD are explicit evidence gaps until their production adapters finish successfully.
-        evidence_gaps = []
-        for action in (ActionType.INTERACTION_ANALYSIS, ActionType.ADMET_FILTERING, ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS):
-            if action not in by_action or (request.cpu_only and action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}):
-                evidence_gaps.append(action.value)
-        artifacts = self.store.list_artifacts(task_id)
-        self.store.update_progress(task_id, "report_generation", JobStatus.RUNNING,
-                                   message="正在汇总结果、版本与可追溯证据")
-        reports = generate_report(task_id, task_dir, request=request.model_dump(mode="json"), plan=plan.model_dump(mode="json"),
-                                  results=top_hits, rejected_strategies=rejected, health=health_report(self.settings),
-                                  jobs=self.store.list_jobs(task_id), artifacts=artifacts,
-                                  pocket_resolution=pocket_resolution.model_dump(mode="json"),
-                                  input_manifest=self._read_input_manifest(request).model_dump(mode="json"))
-        for name, raw_path in reports.items():
-            path = Path(raw_path); self.store.add_artifact(task_id, None, name, path, path.suffix.lstrip(".").upper(), sha256_file(path))
-        self.store.update_progress(task_id, "report_generation", JobStatus.SUCCEEDED,
-                                   message="可复现报告已生成")
-        return {"task_id": task_id, "status": "succeeded", "top_hits": top_hits, "reports": reports,
-                "workflow_plan": str(task_dir / "workflow_plan.json"), "evidence_gaps": evidence_gaps,
-                "rejected_strategies": rejected, "planning": planning,
-                "pocket_resolution": pocket_resolution.model_dump(mode="json"),
-                "input_manifest": self._read_input_manifest(request).model_dump(mode="json")}
-
-
 def build_cpu_baseline_plan() -> WorkflowPlan:
     actions = [
         ("input-validation", ActionType.INPUT_VALIDATION),
@@ -733,17 +701,3 @@ def build_cpu_baseline_plan() -> WorkflowPlan:
         steps.append(WorkflowStep(step_id=step_id, action_type=action,
                                   requires=[steps[-1].step_id] if steps else [], **kwargs))
     return WorkflowPlan(strategy_id="cpu-noncovalent-sbdd-baseline", steps=steps)
-
-
-def _merge_score_csvs(primary: Path, additional: Path, output: Path) -> Path:
-    import csv
-    with primary.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    with additional.open(encoding="utf-8-sig", newline="") as handle:
-        extra = {row["source_id"]: row for row in csv.DictReader(handle)}
-    for row in rows:
-        row.update(extra.get(row.get("source_id", ""), {}))
-    fields = list(dict.fromkeys(key for row in rows for key in row))
-    with output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
-    return output

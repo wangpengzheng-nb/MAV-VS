@@ -33,6 +33,12 @@ REVIEWER_SCIENCE_PROMPT = """\
 - 先验知识(如有)是否被遵守? (如工具选择规则)
 - N/A条件: 无用户约束也无先验知识
 
+## 维度4: 问题解决度与证据忠实度
+- strategy.problem_focus 是否真正对应用户筛选任务，而不是泛化模板?
+- target_evidence_refs 是否引用调研证据；是否凭空创造PDB、残基、活性或口袋坐标?
+- 暂未接入工具是否在 missing_capabilities 中显式标注?
+- N/A条件: 两个策略都缺少新增字段
+
 ## 综合投票优先级
 1. 靶点适配性判定为不可行 → 直接判负
 2. 用户约束有致命违反 → 直接判负
@@ -75,6 +81,8 @@ REVIEWER_ENGINEERING_PROMPT = """\
 ## 维度2: 工具与资源可用性
 - action所需工具是否开源/可获取? (优先开源)
 - computational_cost估算是否合理?
+- 科学合理但暂未接入的工具路线可以接受，但必须 execution_status!=currently_executable 且写明 missing_capabilities
+- 把未接工具伪装成可执行、或 action 链无法编译，是致命工程问题
 - N/A条件: 两个策略都未定义computational_cost
 
 ## 维度3: 鲁棒性与扩展性
@@ -254,6 +262,11 @@ class TournamentReviewer:
         return f"""## {label}: {s.get('strategy_name','?')}
 方法: {approach}
 标签: {s.get('strategy_tagline','?')}
+问题焦点: {s.get('problem_focus','?')}
+多样性轴: {s.get('diversity_axis','?')} | 风险: {s.get('risk_level','?')}
+执行状态: {s.get('execution_status','?')} | 缺失能力: {s.get('missing_capabilities', [])}
+证据引用: {s.get('target_evidence_refs', [])}
+用户需求覆盖: {s.get('user_requirement_coverage', [])}
 原理: {(s.get('rationale','?') or '')[:300]}
 pipeline ({len(steps)}步):
 {steps_text}

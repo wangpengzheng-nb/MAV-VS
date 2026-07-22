@@ -205,12 +205,24 @@ def _plip_interaction_counts(protein_path: Path, work_dir: Path, plip_path: Path
         return {}, "PLIP unavailable"
     output_dir = work_dir / "plip_cocrystal"
     output_dir.mkdir(parents=True, exist_ok=True)
+    # 🆕 缓存检查：如果 PLIP 已对此 PDB 运行过，直接复用报告
+    existing = [output_dir / "report.xml", *sorted(output_dir.glob("*_report.xml"))]
+    cached = next((p for p in existing if p.is_file()), None)
+    if cached is not None:
+        protonated = next(output_dir.glob("*_protonated.pdb"), None)
+        if protonated and protonated.stat().st_mtime > protein_path.stat().st_mtime:
+            return _parse_plip_report(cached), "PLIP completed (cached)"
+    log_path = work_dir / "plip_cocrystal.log"
     result = run_argv([str(plip_path), "-f", str(protein_path), "-o", str(output_dir), "-x", "-t", "--maxthreads", "1"],
-                      cwd=work_dir, timeout=1800, log_path=work_dir / "plip_cocrystal.log")
+                      cwd=work_dir, timeout=1800, log_path=log_path)
     reports = [output_dir / "report.xml", *sorted(output_dir.glob("*_report.xml"))]
     report = next((path for path in reports if path.is_file()), None)
     if result.returncode or report is None:
         return {}, f"PLIP failed: {result.stderr[-300:] or 'report.xml missing'}"
+    return _parse_plip_report(report), "PLIP completed"
+
+
+def _parse_plip_report(report: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     root = ET.parse(report).getroot()
     for site in root.findall(".//bindingsite"):
@@ -225,7 +237,7 @@ def _plip_interaction_counts(protein_path: Path, work_dir: Path, plip_path: Path
         for key in (name, f"{name}{position}", f"{name}{position}{chain}"):
             if key:
                 counts[key] = max(counts.get(key, 0), interaction_count)
-    return counts, "PLIP completed"
+    return counts
 
 
 def _ligand_candidates(protein_path: Path, protein: list[Atom], hetero: list[Atom], covalent: set[str],

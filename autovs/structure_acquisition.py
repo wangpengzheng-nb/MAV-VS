@@ -24,7 +24,8 @@ def rank_verified_holo_candidates(research: dict[str, Any], *, limit: int = 5) -
     for raw in research.get("verified_pdb_structures", []):
         item = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
         pdb_id = str(item.get("pdb_id", "")).upper()
-        if (not PDB_ID_RE.fullmatch(pdb_id) or not item.get("has_ligand")):
+        if (not PDB_ID_RE.fullmatch(pdb_id) or not item.get("has_ligand")
+                or not item.get("uniprot_mapped")):
             continue
         item["pdb_id"] = pdb_id
         item["target_uniprot_id"] = target_uniprot

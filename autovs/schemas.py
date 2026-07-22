@@ -3,8 +3,11 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
+import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from src.agents.target_research.models import TargetIdentity, TargetIntent
 
 
 class StrictModel(BaseModel):
@@ -14,6 +17,7 @@ class StrictModel(BaseModel):
 class ActionType(str, Enum):
     INPUT_VALIDATION = "input_validation"
     TARGET_STRUCTURE_ACQUISITION = "target_structure_acquisition"
+    TARGET_STRUCTURE_PREDICTION = "target_structure_prediction"
     PROTEIN_PREPARATION = "protein_preparation"
     POCKET_DEFINITION = "pocket_definition"
     MOLECULE_STANDARDIZATION = "molecule_standardization"
@@ -165,6 +169,8 @@ class TaskRequest(StrictModel):
     ph: float = Field(default=7.4, ge=0.0, le=14.0)
     cpu_only: bool = False
     resume: bool = True
+    target_identity: TargetIdentity | None = None
+    screening_intent: TargetIntent | None = None
 
 
 class LibraryAsset(StrictModel):
@@ -215,6 +221,8 @@ class InputManifest(StrictModel):
     expert_pocket: PocketSpec = Field(default_factory=PocketSpec)
     warnings: list[str] = Field(default_factory=list)
     constraint_summary: list[str] = Field(default_factory=list)
+    target_identity: TargetIdentity | None = None
+    screening_intent: TargetIntent | None = None
 
 
 class JobStatus(str, Enum):
@@ -277,3 +285,22 @@ def ensure_existing_file(value: str, label: str) -> Path:
     if not path.is_file():
         raise ValueError(f"{label} does not exist or is not a file: {path}")
     return path
+
+
+def parse_gene_from_query(query: str, gene: str, log: list[str]) -> str:
+    user_gene = ""
+    m = re.match(r'靶点基因:\s*([A-Za-z0-9][-A-Za-z0-9]*)', query)
+    if m:
+        user_gene = m.group(1).upper()
+        llm_gene = gene.upper()
+        if user_gene and user_gene != llm_gene:
+            # 用户输入是 LLM 结果的子串（如 EP2 vs PTGER2）→ 保留 LLM 的完整名
+            if user_gene in llm_gene or llm_gene in user_gene:
+                log.append(f"📌 用户输入别名: {user_gene} → LLM映射: {gene}")
+            else:
+                # 完全不同 → 以用户输入为准
+                log.append(f"📌 用户指定基因: {user_gene}（覆盖LLM解析: {gene}）")
+                gene = user_gene
+        elif user_gene:
+            gene = user_gene
+    return gene

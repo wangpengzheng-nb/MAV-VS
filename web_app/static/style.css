@@ -260,6 +260,18 @@ textarea:focus, input[type="text"]:focus { border-color: var(--blue); box-shadow
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 40; max-width: 340px; padding: 11px 14px; border-radius: 8px; background: #10242d; color: white; box-shadow: 0 12px 30px rgba(0,0,0,.18); font-size: 11px; }
 
 button:focus-visible, summary:focus-visible, a:focus-visible, label.upload-field:has(input:focus-visible) { outline: 3px solid rgba(23,107,135,.22); outline-offset: 2px; }
+.target-dialog { width: min(620px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 8px; padding: 0; box-shadow: 0 24px 70px rgba(16,35,43,.24); color: var(--ink); }
+.target-dialog::backdrop { background: rgba(16,35,43,.42); }
+.target-dialog form { padding: 24px; }
+.target-dialog-heading h2 { margin: 6px 0; font-size: 22px; }
+.target-dialog-heading p { margin: 0 0 18px; color: var(--muted); }
+.target-candidates { display: grid; gap: 8px; margin-bottom: 18px; }
+.target-candidate { width: 100%; min-height: 68px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 6px; background: #fff; display: flex; justify-content: space-between; gap: 18px; text-align: left; cursor: pointer; }
+.target-candidate:hover { border-color: var(--teal); background: #f5faf9; }
+.target-candidate span { min-width: 0; display: grid; gap: 4px; }
+.target-candidate span:last-child { flex: 0 0 150px; text-align: right; }
+.target-candidate strong, .target-candidate small { overflow-wrap: anywhere; }
+.target-candidate small { color: var(--muted); }
 [hidden] { display: none !important; }
 
 @media (max-width: 1050px) {

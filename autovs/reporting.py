@@ -9,7 +9,8 @@ def generate_report(task_id: str, task_dir: Path, *, request: dict, plan: dict,
                     results: list[dict], rejected_strategies: list[dict],
                     health: dict, jobs: list[dict], artifacts: list[dict],
                     pocket_resolution: dict | None = None,
-                    input_manifest: dict | None = None) -> dict[str, str]:
+                    input_manifest: dict | None = None,
+                    candidate_strategies: list[dict] | None = None) -> dict[str, str]:
     report_dir = task_dir / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
     md_path, html_path = report_dir / "report.md", report_dir / "report.html"
@@ -34,7 +35,20 @@ def generate_report(task_id: str, task_dir: Path, *, request: dict, plan: dict,
     if warnings:
         lines.extend(["### 输入提示", "", *[f"- {warning}" for warning in warnings], ""])
     lines.extend(["## 执行策略", "", f"- Strategy: `{plan.get('strategy_id', 'baseline')}`",
-                  f"- Plan version: `{plan.get('plan_version', '1.0')}`", "", "## 口袋预检", ""])
+                  f"- Plan version: `{plan.get('plan_version', '1.0')}`", ""])
+    if candidate_strategies:
+        lines.extend(["## 候选策略组合", ""])
+        for item in candidate_strategies[:12]:
+            missing = item.get("missing_capabilities") or []
+            lines.append(
+                f"- `{item.get('strategy_name', item.get('strategy_id', '?'))}` "
+                f"[{item.get('execution_status', 'unknown')}] "
+                f"axis={item.get('diversity_axis', '')}; focus={item.get('problem_focus', '')}"
+            )
+            if missing:
+                lines.append(f"  - capability gaps: {', '.join(str(x) for x in missing[:4])}")
+        lines.append("")
+    lines.extend(["## 口袋预检", ""])
     pocket = (pocket_resolution or {}).get("selected_pocket", {})
     if pocket:
         lines.extend([

@@ -11,6 +11,7 @@ from autovs.schemas import ActionType, ToolCapability
 CAPABILITY_DEFINITIONS = {
     ActionType.INPUT_VALIDATION: ("Strict input binder", "Validate an optional PDB and a UTF-8 molecule_id<TAB>SMILES library", "python", ["PDB", "strict_smi_v1"], ["JSON", "SMI", "TSV"], False),
     ActionType.TARGET_STRUCTURE_ACQUISITION: ("Controlled RCSB structure acquisition", "Download only research-verified experimental holo PDB IDs from files.rcsb.org", "python", ["JSON"], ["PDB", "JSON"], False),
+    ActionType.TARGET_STRUCTURE_PREDICTION: ("Predicted target structure acquisition", "Predict a target structure through a configured AlphaFold or Boltz adapter", "slurm", ["FASTA", "JSON"], ["PDB", "CIF", "JSON"], True),
     ActionType.PROTEIN_PREPARATION: ("OpenBabel protein preparation", "Remove water, add hydrogens and produce receptor files", "conda", ["PDB"], ["PDB", "PDBQT"], False),
     ActionType.POCKET_DEFINITION: ("Evidence-backed pocket resolver", "Resolve and validate a pocket from a user box, uploaded cocrystal ligand, verified research structure, or mapped key residues", "python", ["PDB", "JSON"], ["JSON"], False),
     ActionType.MOLECULE_STANDARDIZATION: ("RDKit standardization", "Canonicalize and filter strict SMI while preserving the user molecule ID", "python", ["strict_smi_v1"], ["CSV", "SDF"], False),
@@ -43,6 +44,8 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 availability, reason = "unavailable", "neither smina nor GNINA is configured"
             elif not _exists(gnina):
                 availability, reason = "degraded", "GNINA unavailable; CPU smina only"
+        elif action == ActionType.TARGET_STRUCTURE_PREDICTION:
+            availability, reason = "unavailable", "AlphaFold/Boltz structure prediction adapter is not configured yet"
         elif action == ActionType.POCKET_DEFINITION and not _exists(settings.executable("plip")):
             availability, reason = "degraded", "PLIP unavailable; geometric ligand-contact validation remains available"
         elif action == ActionType.INTERACTION_ANALYSIS and not _exists(settings.executable("plip")):
