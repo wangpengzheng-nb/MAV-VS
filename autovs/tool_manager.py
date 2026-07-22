@@ -16,7 +16,10 @@ from autovs.library import normalize_smi_library, verify_default_library
 from autovs.pocket import resolve_pocket
 from autovs.preparation import prepare_library
 from autovs.ranking import rank_csv
-from autovs.schemas import ActionType, InputManifest, JobRecord, JobStatus, WorkflowStep
+from autovs.schemas import (
+    ActionType, ExecutorConfig, ExecutorType, InputManifest, JobRecord, JobStatus,
+    WorkflowStep,
+)
 from autovs.security import ensure_within, run_argv, sha256_file
 from autovs.structure_acquisition import acquire_rcsb_structures
 
@@ -28,6 +31,76 @@ class ToolManager:
     @property
     def allowed_roots(self) -> list[Path]:
         return [self.settings.task_root, self.settings.config_path.parent.parent]
+
+    # ── 统一工具执行器 API ──────────────────────────────────────────
+
+    def _executor(self, name: str) -> ExecutorConfig | None:
+        """查找工具执行器配置。"""
+        return self.settings.executor_config(name)
+
+    def _require_executor(self, name: str) -> ExecutorConfig:
+        """查找工具执行器配置，找不到或路径无效时抛出明确错误。"""
+        cfg = self._executor(name)
+        if cfg is None:
+            raise RuntimeError(f"工具 '{name}' 未在 config/tools.toml [executors] 中注册")
+        if cfg.executor == ExecutorType.SUBPROCESS:
+            if not cfg.path:
+                raise RuntimeError(f"工具 '{name}' 的 path 为空")
+            if not Path(cfg.path).exists():
+                raise RuntimeError(
+                    f"工具 '{name}' 的二进制不存在: {cfg.path}"
+                    + (f"（来自 conda 环境 {cfg.env_hint}）" if cfg.env_hint else "")
+                )
+        elif cfg.executor == ExecutorType.APPTAINER:
+            resolved = cfg.resolved_path(str(self.settings.config_path.parent))
+            if not resolved or not resolved.exists():
+                raise RuntimeError(f"工具 '{name}' 的容器镜像不存在: {cfg.path}")
+        return cfg
+
+    def health_check(self, name: str) -> tuple[bool, str]:
+        """快速健康检查：工具是否可用。
+
+        Returns:
+            (healthy, message)
+        """
+        cfg = self._executor(name)
+        if cfg is None:
+            return False, f"工具 '{name}' 未注册"
+        try:
+            if cfg.executor == ExecutorType.SUBPROCESS:
+                if not cfg.path or not Path(cfg.path).exists():
+                    return False, f"二进制不存在: {cfg.path}"
+                if cfg.health_check and cfg.health_check != "--version":
+                    result = run_argv(
+                        [cfg.path, cfg.health_check],
+                        cwd=Path("/tmp"), timeout=10,
+                    )
+                    if result.returncode != 0:
+                        return False, f"健康检查失败 (exit={result.returncode}): {result.stderr[:200]}"
+                return True, f"二进制可用: {cfg.path}"
+            elif cfg.executor == ExecutorType.PYTHON_MODULE:
+                if not cfg.module:
+                    return False, "未配置 Python 模块名"
+                import importlib.util
+                if importlib.util.find_spec(cfg.module) is not None:
+                    return True, f"Python 模块可导入: {cfg.module}"
+                return False, f"Python 模块不可导入: {cfg.module}（可能需要 conda activate {cfg.env}）"
+            elif cfg.executor == ExecutorType.APPTAINER:
+                resolved = cfg.resolved_path(str(self.settings.config_path.parent))
+                if not resolved or not resolved.exists():
+                    return False, f"容器镜像不存在: {cfg.path}"
+                return True, f"容器镜像可用: {resolved}"
+            return False, f"未知执行器类型: {cfg.executor.value}"
+        except Exception as exc:
+            return False, f"健康检查异常: {exc}"
+
+    def _required_binary(self, name: str) -> Path:
+        """【已废弃】获取工具二进制路径；新代码应使用 _require_executor()。
+
+        保留此方法以确保现有 _dispatch 分支无回归。
+        """
+        cfg = self._require_executor(name)
+        return Path(cfg.path) if cfg.path else Path()
 
     def submit(self, task_id: str, step: WorkflowStep, inputs: dict[str, Any], *, background: bool = True) -> JobRecord:
         task = self.store.get_task(task_id)
@@ -175,10 +248,12 @@ class ToolManager:
                 research = json.loads(verified_research.read_text(encoding="utf-8"))
                 if not isinstance(research, dict):
                     raise ValueError("research artifact must contain a JSON object")
+            plip_cfg = self._executor("plip")
+            plip_path = plip_cfg.resolved_path() if plip_cfg and plip_cfg.path and Path(plip_cfg.path).exists() else None
             pocket = resolve_pocket(protein, center=inputs.get("center"), size=tuple(inputs.get("size", (24, 24, 24))),
                                     key_residues=list(inputs.get("key_residues", [])),
                                     cocrystal_ligand=inputs.get("cocrystal_ligand"), research=research,
-                                    work_dir=work_dir, plip_path=self.settings.executable("plip"))
+                                    work_dir=work_dir, plip_path=plip_path)
             output = work_dir / "pocket.json"
             output.write_text(pocket.model_dump_json(indent=2), encoding="utf-8")
             return {"pocket": output}
@@ -189,9 +264,10 @@ class ToolManager:
                                    logp_range=tuple(step.parameters.get("logp_range", (-2, 8))))
         if action == ActionType.PROTEIN_PREPARATION:
             protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
-            obabel = self.settings.executable("obabel")
+            obabel_cfg = self._require_executor("obabel")
+            obabel = Path(obabel_cfg.path) if obabel_cfg.path else None
             if not obabel or not obabel.exists():
-                raise RuntimeError("OpenBabel is unavailable")
+                raise RuntimeError("OpenBabel 不可用：请确认 config/tools.toml [executors.obabel]")
             clean, pdbqt = work_dir / "receptor_clean.pdb", work_dir / "receptor.pdbqt"
             protein_only = work_dir / "protein_only_input.pdb"
             protein_lines = [line for line in protein.read_text(errors="ignore").splitlines() if line.startswith("ATOM  ")]
@@ -216,13 +292,16 @@ class ToolManager:
             return self._extract_poses(inputs, work_dir)
         if action == ActionType.INTERACTION_ANALYSIS:
             return self._run_plip(inputs, work_dir)
+        if action == ActionType.STRUCTURE_ANALYSIS:
+            return self._analyze_structure(inputs, work_dir)
         raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
 
     def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
         from rdkit import Chem
-        smina = self.settings.executable("smina")
+        smina_cfg = self._require_executor("smina")
+        smina = Path(smina_cfg.path) if smina_cfg.path else None
         if not smina or not smina.exists():
-            raise RuntimeError("smina binary unavailable")
+            raise RuntimeError("smina 二进制不可用：请确认 config/tools.toml [executors.smina]")
         receptor = ensure_within(inputs["receptor_pdbqt"], [self.settings.task_root], must_exist=True)
         ligands = ensure_within(inputs["ligands_sdf"], [self.settings.task_root], must_exist=True)
         center, size = inputs.get("center"), inputs.get("size", [24, 24, 24])
@@ -319,9 +398,10 @@ class ToolManager:
         return {"selected_poses": selected_sdf, "complex_index": index_path, "complex_count": len(rows)}
 
     def _run_plip(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
-        plip = self.settings.executable("plip")
+        plip_cfg = self._require_executor("plip")
+        plip = Path(plip_cfg.path) if plip_cfg.path else None
         if not plip or not plip.exists():
-            raise RuntimeError("PLIP binary unavailable")
+            raise RuntimeError("PLIP 二进制不可用：请确认 config/tools.toml [executors.plip]")
         index = ensure_within(inputs["complex_index"], [self.settings.task_root], must_exist=True)
         key_residues = {_normalize_residue(x) for x in inputs.get("key_residues", [])}
         output_root = work_dir / "raw"; output_root.mkdir(exist_ok=True)
@@ -357,6 +437,68 @@ class ToolManager:
         with failed.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["source_id", "reason"]); writer.writeheader(); writer.writerows(failures)
         return {"plip_scores": scores, "failed": failed, "success_count": len(summaries), "failed_count": len(failures)}
+
+    def _analyze_structure(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Gemmi 结构解析：验证 PDB/mmCIF，提取配体、链和口袋残基信息。"""
+        from autovs.gemmi_utils import (
+            find_ligands, find_residues_around, read_structure,
+            structure_summary, validate_structure,
+        )
+
+        protein_path = inputs.get("protein_path")
+        if not protein_path:
+            raise ValueError("STRUCTURE_ANALYSIS 需要 protein_path 输入")
+        protein = ensure_within(protein_path, self.allowed_roots, must_exist=True)
+
+        # 结构验证
+        validation = validate_structure(protein)
+        validation_path = work_dir / "structure_validation.json"
+        validation_path.write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 读取结构并提取配体
+        structure = read_structure(protein)
+        ligands = find_ligands(structure)
+
+        # 口袋中心残基搜索
+        pocket_residues: list[dict[str, Any]] = []
+        center = inputs.get("center")
+        if center and len(center) == 3:
+            radius = float(inputs.get("radius", 8.0))
+            pocket_residues = find_residues_around(
+                structure,
+                (float(center[0]), float(center[1]), float(center[2])),
+                radius=radius,
+            )
+
+        # 结构摘要
+        summary = structure_summary(structure)
+        summary_path = work_dir / "structure_summary.txt"
+        summary_path.write_text(summary, encoding="utf-8")
+
+        output = {
+            "structure_validation": str(validation_path),
+            "structure_summary": str(summary_path),
+            "atom_count": validation["atom_count"],
+            "chain_count": len(validation["chains"]),
+            "ligand_count": len(ligands),
+            "ligands": ligands,
+            "pocket_residues": pocket_residues,
+            "resolution": validation.get("resolution"),
+            "issues": validation.get("issues", []),
+        }
+
+        # 配体详细信息写入 JSON
+        if ligands:
+            lig_path = work_dir / "ligands.json"
+            lig_path.write_text(json.dumps(ligands, ensure_ascii=False, indent=2), encoding="utf-8")
+            output["ligands_json"] = str(lig_path)
+
+        if pocket_residues:
+            pocket_path = work_dir / "pocket_residues.json"
+            pocket_path.write_text(json.dumps(pocket_residues, ensure_ascii=False, indent=2), encoding="utf-8")
+            output["pocket_residues_json"] = str(pocket_path)
+
+        return output
 
 
 def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:

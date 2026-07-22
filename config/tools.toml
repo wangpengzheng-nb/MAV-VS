@@ -31,6 +31,79 @@ plip = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/plip"
 obabel = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/obabel"
 fpocket = ""
 
+# ── 结构化工具执行器注册表 (v2) ──────────────────────────────────────
+# 每个条目描述工具的调用方式、环境和健康检查。
+# executor: subprocess | python_module | apptainer | slurm
+
+[executors.smina]
+name = "smina"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/miniforge3/envs/smina_stage2/bin/smina"
+env_hint = "smina_stage2"
+health_check = "--version"
+description = "CPU 分子对接引擎（forked from AutoDock Vina）"
+
+[executors.gnina]
+name = "gnina"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/software/gnina"
+health_check = "--version"
+description = "GPU 分子对接引擎（CNN scoring）"
+gpu_required = true
+
+[executors.plip]
+name = "plip"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/plip"
+env_hint = "plip"
+health_check = "--help"
+description = "蛋白质-配体相互作用指纹分析"
+
+[executors.obabel]
+name = "obabel"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/miniforge3/envs/plip/bin/obabel"
+env_hint = "plip"
+health_check = "-V"
+description = "OpenBabel 分子格式转换（与 PLIP 共用 plip 环境）"
+
+[executors.admet_ai]
+name = "admet_ai"
+executor = "python_module"
+env = "autovs-admet"
+module = "admet_ai.admet_predict"
+health_check = "admet_ai"
+description = "ADMET 性质预测（基于图神经网络）"
+
+[executors.gromacs]
+name = "gromacs"
+executor = "apptainer"
+path = "containers/gromacs_md.sif"
+health_check = "gmx --version"
+description = "GROMACS 分子动力学模拟（Apptainer 容器）"
+gpu_required = true
+
+[executors.conda]
+name = "conda"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/miniforge3/bin/conda"
+health_check = "--version"
+description = "Conda 包管理器（用于环境健康检查）"
+
+[executors.sbatch]
+name = "sbatch"
+executor = "subprocess"
+path = "/usr/bin/sbatch"
+health_check = "--version"
+description = "Slurm 作业提交"
+
+[executors.gemmi]
+name = "gemmi"
+executor = "python_module"
+module = "gemmi"
+health_check = "gemmi"
+description = "Gemmi 结构解析库（PDB/mmCIF 读取、配体检测、链提取、口袋搜索）"
+
 [environments]
 core = "autovs-core"
 smina = "smina_stage2"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from autovs.config import Settings
+from autovs.config import PROJECT_ROOT, Settings
 from autovs.library import verify_default_library
 from autovs.schemas import ActionType, ToolCapability
 
@@ -26,6 +26,7 @@ CAPABILITY_DEFINITIONS = {
     ActionType.MOLECULAR_DYNAMICS: ("GROMACS 100 ns + MMGBSA", "Charge-audited production MD and 70-100 ns MMGBSA", "apptainer", ["PDB", "SDF", "CSV"], ["XTC", "CSV", "JSON"], True),
     ActionType.FINAL_RANKING: ("Evidence ranker", "Direction-aware normalized ranking with scaffold diversity", "python", ["CSV", "SDF"], ["CSV", "SDF"], False),
     ActionType.REPORT_GENERATION: ("Reproducibility reporter", "Generate Markdown, HTML and artifact manifest", "python", ["JSON", "CSV"], ["MD", "HTML", "JSON"], False),
+    ActionType.STRUCTURE_ANALYSIS: ("Gemmi structure analyzer", "Validate PDB/mmCIF, detect ligands, extract chains, search pocket residues", "python", ["PDB", "mmCIF"], ["JSON", "TXT"], False),
 }
 
 
@@ -39,31 +40,50 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
         name, desc, executor, inputs, outputs, gpu = definition
         availability, reason = "available", ""
         if action == ActionType.MOLECULAR_DOCKING:
-            smina, gnina = settings.executable("smina"), settings.executable("gnina")
-            if not _exists(smina) and not _exists(gnina):
+            smina_cfg = settings.executor_config("smina")
+            gnina_cfg = settings.executor_config("gnina")
+            has_smina = smina_cfg and smina_cfg.exists(str(PROJECT_ROOT)) if smina_cfg else False
+            has_gnina = gnina_cfg and gnina_cfg.exists(str(PROJECT_ROOT)) if gnina_cfg else False
+            if not has_smina and not has_gnina:
                 availability, reason = "unavailable", "neither smina nor GNINA is configured"
-            elif not _exists(gnina):
+            elif not has_gnina:
                 availability, reason = "degraded", "GNINA unavailable; CPU smina only"
         elif action == ActionType.TARGET_STRUCTURE_PREDICTION:
             availability, reason = "unavailable", "AlphaFold/Boltz structure prediction adapter is not configured yet"
-        elif action == ActionType.POCKET_DEFINITION and not _exists(settings.executable("plip")):
-            availability, reason = "degraded", "PLIP unavailable; geometric ligand-contact validation remains available"
-        elif action == ActionType.INTERACTION_ANALYSIS and not _exists(settings.executable("plip")):
-            availability, reason = "unavailable", "PLIP binary not found"
-        elif action == ActionType.PROTEIN_PREPARATION and not _exists(settings.executable("obabel")):
-            availability, reason = "unavailable", "OpenBabel binary not found"
+        elif action == ActionType.POCKET_DEFINITION:
+            plip_cfg = settings.executor_config("plip")
+            if not plip_cfg or not plip_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "degraded", "PLIP unavailable; geometric ligand-contact validation remains available"
+        elif action == ActionType.INTERACTION_ANALYSIS:
+            plip_cfg = settings.executor_config("plip")
+            if not plip_cfg or not plip_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "PLIP binary not found"
+        elif action == ActionType.PROTEIN_PREPARATION:
+            obabel_cfg = settings.executor_config("obabel")
+            if not obabel_cfg or not obabel_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "OpenBabel binary not found"
         elif action == ActionType.ADMET_FILTERING:
-            conda = settings.executable("conda")
-            env_path = conda.parent.parent / "envs" / settings.environment("admet") if conda else None
-            if not _exists(env_path):
-                availability, reason = "degraded", "autovs-admet environment is not installed"
+            admet_cfg = settings.executor_config("admet_ai")
+            if admet_cfg and admet_cfg.env:
+                conda = settings.executable("conda")
+                env_path = conda.parent.parent / "envs" / admet_cfg.env if conda else None
+                if not _exists(env_path):
+                    availability, reason = "degraded", f"conda 环境 {admet_cfg.env} 未安装"
+            else:
+                availability, reason = "degraded", "admet_ai 未在 [executors] 中配置"
         elif action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
-            if not _exists(settings.container("gromacs")):
+            gromacs_cfg = settings.executor_config("gromacs")
+            if not gromacs_cfg or not gromacs_cfg.exists(str(PROJECT_ROOT)):
                 availability, reason = "unavailable", "GROMACS Apptainer image not found"
             elif not _exists(settings.executable("sbatch")):
                 availability, reason = "unavailable", "Slurm sbatch not found"
             else:
                 availability, reason = "degraded", "GPU execution requires a healthy Slurm GPU partition"
+        elif action == ActionType.STRUCTURE_ANALYSIS:
+            try:
+                import gemmi  # noqa: F401
+            except ImportError:
+                availability, reason = "unavailable", "gemmi Python package not installed (pip install gemmi)"
         result.append(ToolCapability(
             action_type=action, name=name, description=desc, availability=availability,
             executor=executor, input_formats=inputs, output_formats=outputs,

@@ -23,6 +23,7 @@ ALIASES = {
     "molecular_dynamics": ActionType.MOLECULAR_DYNAMICS,
     "final_ranking": ActionType.FINAL_RANKING,
     "report_generation": ActionType.REPORT_GENERATION,
+    "structure_analysis": ActionType.STRUCTURE_ANALYSIS,
 }
 
 UNSUPPORTED_V1 = {

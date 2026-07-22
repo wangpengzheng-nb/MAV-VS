@@ -70,6 +70,7 @@ ACTION_PHASE = {
     ActionType.POSE_EXTRACTION: "pose_extraction",
     ActionType.INTERACTION_ANALYSIS: "interaction_analysis",
     ActionType.FINAL_RANKING: "final_ranking",
+    ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
 }
 
 LLM_ONLY_PHASES = ("target_research", "strategy_generation", "strategy_voting", "strategy_evolution")

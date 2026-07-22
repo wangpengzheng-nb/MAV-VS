@@ -32,6 +32,7 @@ class ActionType(str, Enum):
     MOLECULAR_DYNAMICS = "molecular_dynamics"
     FINAL_RANKING = "final_ranking"
     REPORT_GENERATION = "report_generation"
+    STRUCTURE_ANALYSIS = "structure_analysis"
 
 
 class ArtifactRef(StrictModel):
@@ -259,6 +260,39 @@ class ToolCapability(StrictModel):
     output_formats: list[str]
     gpu_required: bool = False
     reason: str = ""
+
+
+class ExecutorType(str, Enum):
+    SUBPROCESS = "subprocess"          # 直接调用外部二进制
+    PYTHON_MODULE = "python_module"    # conda run -n <env> python -m <module>
+    APPTAINER = "apptainer"            # Apptainer/Singularity 容器
+    SLURM = "slurm"                    # Slurm 作业提交
+
+
+class ExecutorConfig(StrictModel):
+    """结构化工具执行器注册表。"""
+    name: str = Field(min_length=1, max_length=40)
+    executor: ExecutorType
+    path: str | None = None             # 二进制或脚本路径（subprocess / apptainer）
+    env: str | None = None              # conda 环境名（python_module）
+    module: str | None = None           # Python 模块名（python_module）
+    env_hint: str = ""                  # 仅文档：该二进制来自哪个 conda 环境
+    health_check: str = ""              # 健康检查命令或模块导入名
+    description: str = ""
+    gpu_required: bool = False
+
+    def resolved_path(self, project_root: str = "") -> Path | None:
+        if not self.path:
+            return None
+        from pathlib import Path as _Path
+        p = _Path(self.path)
+        if p.is_absolute():
+            return p
+        return (_Path(project_root) / p).resolve() if project_root else p
+
+    def exists(self, project_root: str = "") -> bool:
+        p = self.resolved_path(project_root)
+        return p is not None and p.is_file()
 
 
 class MoleculeResult(StrictModel):

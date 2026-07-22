@@ -186,6 +186,22 @@ def _bind_final_ranking(outputs: dict[str, Any], state: dict[str, Any]) -> None:
     state[HIT_COUNT] = outputs.get("hit_count", 0)
 
 
+def _resolve_structure_analysis(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "protein_path": state[TARGET_STRUCTURE],
+        "center": state.get(POCKET_CENTER, kwargs.get("center")),
+        "radius": kwargs.get("radius", 8.0),
+    }
+
+
+def _bind_structure_analysis(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    """从结构分析输出中提取口袋残基信息。"""
+    if outputs.get("pocket_residues"):
+        state["_pocket_residues"] = outputs["pocket_residues"]
+    if outputs.get("resolution"):
+        state["_structure_resolution"] = outputs["resolution"]
+
+
 # ── Registry maps ────────────────────────────────────────────────────
 
 INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
@@ -200,6 +216,7 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.POSE_EXTRACTION: _resolve_pose_extraction,
     ActionType.INTERACTION_ANALYSIS: _resolve_interaction_analysis,
     ActionType.FINAL_RANKING: _resolve_final_ranking,
+    ActionType.STRUCTURE_ANALYSIS: _resolve_structure_analysis,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -214,6 +231,7 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.POSE_EXTRACTION: _bind_pose_extraction,
     ActionType.INTERACTION_ANALYSIS: _bind_interaction_analysis,
     ActionType.FINAL_RANKING: _bind_final_ranking,
+    ActionType.STRUCTURE_ANALYSIS: _bind_structure_analysis,
 }
 
 
@@ -233,6 +251,7 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.POSE_EXTRACTION: "pose_extraction",
     ActionType.INTERACTION_ANALYSIS: "interaction_analysis",
     ActionType.FINAL_RANKING: "final_ranking",
+    ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
 }
 
 

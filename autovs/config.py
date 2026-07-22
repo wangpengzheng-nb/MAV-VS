@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from autovs.schemas import ExecutorConfig, ExecutorType
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,6 +48,47 @@ class Settings:
     def container(self, name: str) -> Path | None:
         value = self.raw.get("containers", {}).get(name, "")
         return _resolve_project_path(value) if value else None
+
+    def executor_config(self, name: str) -> ExecutorConfig | None:
+        """返回结构化工具执行器配置（v2 注册表）。
+
+        优先读取 [executors.<name>]，回退到旧 [executables] 键值并自动推断 executor 类型。
+        """
+        raw_exec = self.raw.get("executors", {}).get(name)
+        if raw_exec:
+            return ExecutorConfig.model_validate(raw_exec)
+        # 回退：旧格式 [executables]
+        legacy = self.raw.get("executables", {}).get(name, "")
+        if not legacy:
+            return None
+        # 推断 executor 类型
+        if name in {"gromacs"} or str(legacy).endswith(".sif"):
+            ex_type = ExecutorType.APPTAINER
+        elif name in {"admet_ai"}:
+            ex_type = ExecutorType.PYTHON_MODULE
+        else:
+            ex_type = ExecutorType.SUBPROCESS
+        return ExecutorConfig(
+            name=name, executor=ex_type, path=str(legacy),
+            env_hint=self.environment(name) if name in self.raw.get("environments", {}) else "",
+        )
+
+    @property
+    def executors(self) -> dict[str, ExecutorConfig]:
+        """返回所有已注册的工具执行器配置。"""
+        result: dict[str, ExecutorConfig] = {}
+        # 新格式
+        for name in self.raw.get("executors", {}):
+            cfg = self.executor_config(name)
+            if cfg:
+                result[name] = cfg
+        # 旧格式补充（未被新格式覆盖的）
+        for name in self.raw.get("executables", {}):
+            if name not in result:
+                cfg = self.executor_config(name)
+                if cfg:
+                    result[name] = cfg
+        return result
 
     def limit(self, name: str, default: Any = None) -> Any:
         return self.raw.get("limits", {}).get(name, default)
