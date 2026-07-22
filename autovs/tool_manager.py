@@ -296,6 +296,8 @@ class ToolManager:
             return self._analyze_structure(inputs, work_dir)
         if action == ActionType.PROTEIN_REPAIR:
             return self._repair_protein(inputs, work_dir)
+        if action == ActionType.PROTONATION:
+            return self._protonate(inputs, work_dir)
         raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
 
     def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
@@ -542,6 +544,63 @@ class ToolManager:
             "long_gap_count": len(report["long_gaps"]),
             "warnings": report["warnings"],
             "missing_atoms_fixed": report["missing_atoms_summary"].get("total_missing", 0),
+        }
+
+    def _protonate(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """PDB2PQR + PROPKA 质子化：pH 可配的加氢与电荷处理。"""
+        from autovs.protonation_utils import protonate_structure, predict_pka
+
+        protein_path = inputs.get("protein_path")
+        if not protein_path:
+            raise ValueError("PROTONATION 需要 protein_path 输入")
+        protein = ensure_within(protein_path, self.allowed_roots, must_exist=True)
+
+        ph = float(inputs.get("ph", 7.4))
+        forcefield = str(inputs.get("forcefield", "PARSE"))
+
+        # 1. 先跑 PROPKA pKa 预测
+        pka_output = work_dir / "propka_output.csv"
+        try:
+            pka_report = predict_pka(protein, ph=ph, output_path=pka_output)
+        except Exception as exc:
+            pka_report = {"error": str(exc), "residues": []}
+        pka_path = work_dir / "pka_prediction.json"
+        pka_path.write_text(json.dumps(pka_report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+        # 2. 执行 PDB2PQR 质子化
+        output_pqr = work_dir / "output.pqr"
+        pdb_out = work_dir / "protonated.pdb"
+        report = protonate_structure(
+            protein,
+            output_pqr,
+            ph=ph,
+            forcefield=forcefield,
+            drop_water=inputs.get("drop_water", True),
+            nodebump=inputs.get("nodebump", False),
+            noopt=inputs.get("noopt", False),
+            pdb_output=pdb_out,
+            chains=inputs.get("chains"),
+        )
+
+        report_path = work_dir / "protonation_report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 3. 电荷摘要
+        from autovs.protonation_utils import quick_charge_summary
+        charge_summary = quick_charge_summary(output_pqr)
+        charge_path = work_dir / "charge_summary.json"
+        charge_path.write_text(json.dumps(charge_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return {
+            "protonated_pdb": str(pdb_out),
+            "output_pqr": str(output_pqr),
+            "pka_prediction": str(pka_path),
+            "protonation_report": str(report_path),
+            "charge_summary": str(charge_path),
+            "total_charge": charge_summary.get("total_charge", 0.0),
+            "ph": ph,
+            "forcefield": forcefield,
+            "warnings": report.get("warnings", []),
         }
 
 

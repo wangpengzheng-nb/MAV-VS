@@ -224,6 +224,26 @@ def _bind_protein_repair(outputs: dict[str, Any], state: dict[str, Any]) -> None
         state["_repair_warnings"] = outputs["warnings"]
 
 
+def _resolve_protonation(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "protein_path": state[TARGET_STRUCTURE],
+        "ph": kwargs.get("ph", 7.4),
+        "forcefield": kwargs.get("forcefield", "PARSE"),
+        "drop_water": kwargs.get("drop_water", True),
+        "nodebump": kwargs.get("nodebump", False),
+        "noopt": kwargs.get("noopt", False),
+        "chains": kwargs.get("chains"),
+    }
+
+
+def _bind_protonation(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    """质子化后的结构更新 target_structure，PQR 路径供下游使用。"""
+    if outputs.get("protonated_pdb"):
+        state[TARGET_STRUCTURE] = outputs["protonated_pdb"]
+    if outputs.get("output_pqr"):
+        state["_protonated_pqr"] = outputs["output_pqr"]
+
+
 # ── Registry maps ────────────────────────────────────────────────────
 
 INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
@@ -240,6 +260,7 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.FINAL_RANKING: _resolve_final_ranking,
     ActionType.STRUCTURE_ANALYSIS: _resolve_structure_analysis,
     ActionType.PROTEIN_REPAIR: _resolve_protein_repair,
+    ActionType.PROTONATION: _resolve_protonation,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -256,6 +277,7 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.FINAL_RANKING: _bind_final_ranking,
     ActionType.STRUCTURE_ANALYSIS: _bind_structure_analysis,
     ActionType.PROTEIN_REPAIR: _bind_protein_repair,
+    ActionType.PROTONATION: _bind_protonation,
 }
 
 
@@ -277,6 +299,7 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.FINAL_RANKING: "final_ranking",
     ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
     ActionType.PROTEIN_REPAIR: "protein_preparation",
+    ActionType.PROTONATION: "protein_preparation",
 }
 
 

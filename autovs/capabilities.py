@@ -28,6 +28,7 @@ CAPABILITY_DEFINITIONS = {
     ActionType.REPORT_GENERATION: ("Reproducibility reporter", "Generate Markdown, HTML and artifact manifest", "python", ["JSON", "CSV"], ["MD", "HTML", "JSON"], False),
     ActionType.STRUCTURE_ANALYSIS: ("Gemmi structure analyzer", "Validate PDB/mmCIF, detect ligands, extract chains, search pocket residues", "python", ["PDB", "mmCIF"], ["JSON", "TXT"], False),
     ActionType.PROTEIN_REPAIR: ("PDBFixer protein repair", "Add missing atoms/hydrogens, replace nonstandard residues, remove unwanted chains/heterogens", "python", ["PDB"], ["PDB", "JSON"], False),
+    ActionType.PROTONATION: ("PDB2PQR + PROPKA protonation", "pH-dependent pKa prediction, hydrogen addition, and forcefield parameter assignment", "python", ["PDB"], ["PQR", "PDB", "JSON"], False),
 }
 
 
@@ -90,6 +91,11 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 import pdbfixer  # noqa: F401
             except ImportError:
                 availability, reason = "unavailable", "pdbfixer Python package not installed (pip install pdbfixer)"
+        elif action == ActionType.PROTONATION:
+            try:
+                import pdb2pqr  # noqa: F401
+            except ImportError:
+                availability, reason = "unavailable", "pdb2pqr Python package not installed (pip install pdb2pqr)"
         result.append(ToolCapability(
             action_type=action, name=name, description=desc, availability=availability,
             executor=executor, input_formats=inputs, output_formats=outputs,

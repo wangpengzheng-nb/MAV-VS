@@ -72,6 +72,7 @@ ACTION_PHASE = {
     ActionType.FINAL_RANKING: "final_ranking",
     ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
     ActionType.PROTEIN_REPAIR: "protein_preparation",
+    ActionType.PROTONATION: "protein_preparation",
 }
 
 LLM_ONLY_PHASES = ("target_research", "strategy_generation", "strategy_voting", "strategy_evolution")

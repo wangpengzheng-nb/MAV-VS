@@ -111,6 +111,13 @@ module = "pdbfixer"
 health_check = "pdbfixer"
 description = "PDBFixer 蛋白质结构修复（补缺失原子/氢、非标准残基替换、链/异质分子删除）"
 
+[executors.pdb2pqr]
+name = "pdb2pqr"
+executor = "python_module"
+module = "pdb2pqr"
+health_check = "pdb2pqr"
+description = "PDB2PQR + PROPKA 质子化与电荷处理（pH可配pKa预测、加氢、力场参数分配）"
+
 [environments]
 core = "autovs-core"
 smina = "smina_stage2"

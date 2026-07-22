@@ -25,6 +25,7 @@ ALIASES = {
     "report_generation": ActionType.REPORT_GENERATION,
     "structure_analysis": ActionType.STRUCTURE_ANALYSIS,
     "protein_repair": ActionType.PROTEIN_REPAIR,
+    "protonation": ActionType.PROTONATION,
 }
 
 UNSUPPORTED_V1 = {
