@@ -11,16 +11,17 @@ from autovs.capabilities import list_capabilities
 from autovs.config import load_settings
 from autovs.planning.contracts import get_contract, find_producers
 from autovs.planning.errors import (
-    ArtifactGapError, PlannerCapabilityGapError, PlannerError,
+    ArtifactGapError, PlannerCapabilityGapError, PlannerError, PlanningValidationError,
 )
 from autovs.planning.graph_builder import (
     PlannedActionIntent, PlannerConstraints, PlannerDraft, PlannerResult,
     PlanningDecision, WorkflowGraphBuilder,
 )
+from autovs.planning.validator import validate_workflow_plan
 from autovs.planning.scoring import candidate_score, estimate_step_cost, estimate_step_risk
 from autovs.schemas import (
     ActionType, InputManifest, LibraryAsset, PocketSpec,
-    TargetAsset, ToolCapability, WorkflowPlan,
+    TargetAsset, ToolCapability, WorkflowPlan, WorkflowStep,
 )
 from autovs.dag import (
     SCREENING_LIBRARY, TARGET_STRUCTURE, POCKET_CENTER,
@@ -71,6 +72,30 @@ def _cap_with(action: ActionType, availability: str = "available") -> ToolCapabi
 
 def _get_capabilities() -> list[ToolCapability]:
     return list_capabilities(load_settings())
+
+
+def _all_available_capabilities() -> list[ToolCapability]:
+    return [
+        ToolCapability(
+            action_type=action,
+            name=action.value,
+            description="test capability",
+            availability="available",
+            executor="python",
+            input_formats=[],
+            output_formats=[],
+            gpu_required=action in {
+                ActionType.TARGET_STRUCTURE_PREDICTION,
+                ActionType.SHORT_MD,
+                ActionType.MOLECULAR_DYNAMICS,
+            },
+        )
+        for action in ActionType
+    ]
+
+
+def _step_by_action(plan: WorkflowPlan, action: ActionType) -> WorkflowStep:
+    return next(step for step in plan.steps if step.action_type == action)
 
 
 # ── Scoring Tests ─────────────────────────────────────────────────────
@@ -332,6 +357,133 @@ class TestGraphBuilder:
         skip_gpu = [d for d in result.decisions
                     if d.action_type == ActionType.SHORT_MD and d.decision == "skipped"]
         assert len(skip_gpu) > 0
+
+    def test_transform_chain_freezes_input_producers(self):
+        """同 key transform 链必须按实际 producer 顺序依赖，不能用最终 producer 回填。"""
+        manifest = _make_manifest(locked_target=True)
+        draft = PlannerDraft(
+            strategy_id="transform_chain",
+            actions=[
+                PlannedActionIntent(action_type=ActionType.MOLECULE_STANDARDIZATION_V2, importance="required"),
+                PlannedActionIntent(action_type=ActionType.IONIZATION_ENUMERATION, importance="required"),
+                PlannedActionIntent(action_type=ActionType.LIGAND_3D_ENUMERATION, importance="required"),
+            ],
+        )
+
+        result = WorkflowGraphBuilder(
+            draft=draft,
+            input_manifest=manifest,
+            capabilities=_all_available_capabilities(),
+            constraints=PlannerConstraints(),
+        ).build()
+
+        standardize = _step_by_action(result.plan, ActionType.MOLECULE_STANDARDIZATION_V2)
+        ionize = _step_by_action(result.plan, ActionType.IONIZATION_ENUMERATION)
+        enumerate_3d = _step_by_action(result.plan, ActionType.LIGAND_3D_ENUMERATION)
+        assert standardize.step_id in ionize.requires
+        assert ionize.step_id in enumerate_3d.requires
+        assert ionize.step_id not in standardize.requires
+
+    def test_target_structure_transform_chain_depends_on_previous_step(self):
+        manifest = _make_manifest(locked_target=True)
+        draft = PlannerDraft(
+            strategy_id="protein_chain",
+            actions=[
+                PlannedActionIntent(action_type=ActionType.PROTEIN_REPAIR, importance="required"),
+                PlannedActionIntent(action_type=ActionType.PROTONATION, importance="required"),
+                PlannedActionIntent(action_type=ActionType.PROTEIN_PREPARATION, importance="required"),
+            ],
+        )
+
+        result = WorkflowGraphBuilder(
+            draft=draft,
+            input_manifest=manifest,
+            capabilities=_all_available_capabilities(),
+            constraints=PlannerConstraints(),
+        ).build()
+
+        repair = _step_by_action(result.plan, ActionType.PROTEIN_REPAIR)
+        protonation = _step_by_action(result.plan, ActionType.PROTONATION)
+        protein_prep = _step_by_action(result.plan, ActionType.PROTEIN_PREPARATION)
+        assert repair.step_id in protonation.requires
+        assert protonation.step_id in protein_prep.requires
+
+    def test_pdbqt_parameterization_does_not_feed_current_smina_docking(self):
+        manifest = _make_manifest(locked_target=True)
+        draft = PlannerDraft(
+            strategy_id="pdbqt_branch",
+            actions=[
+                PlannedActionIntent(action_type=ActionType.LIGAND_3D_ENUMERATION, importance="required"),
+                PlannedActionIntent(action_type=ActionType.PDBQT_PARAMETERIZATION, importance="required"),
+                PlannedActionIntent(action_type=ActionType.MOLECULAR_DOCKING, importance="required"),
+            ],
+        )
+
+        result = WorkflowGraphBuilder(
+            draft=draft,
+            input_manifest=manifest,
+            capabilities=_all_available_capabilities(),
+            constraints=PlannerConstraints(),
+        ).build()
+
+        enumerate_3d = _step_by_action(result.plan, ActionType.LIGAND_3D_ENUMERATION)
+        pdbqt = _step_by_action(result.plan, ActionType.PDBQT_PARAMETERIZATION)
+        docking = _step_by_action(result.plan, ActionType.MOLECULAR_DOCKING)
+        assert enumerate_3d.step_id in pdbqt.requires
+        assert enumerate_3d.step_id in docking.requires
+        assert pdbqt.step_id not in docking.requires
+
+    def test_runtime_unsupported_required_action_is_capability_gap(self):
+        manifest = _make_manifest(locked_target=True)
+        draft = PlannerDraft(
+            strategy_id="unsupported_required",
+            actions=[
+                PlannedActionIntent(action_type=ActionType.ADMET_FILTERING, importance="required"),
+            ],
+        )
+
+        with pytest.raises(PlannerCapabilityGapError, match="admet_filtering"):
+            WorkflowGraphBuilder(
+                draft=draft,
+                input_manifest=manifest,
+                capabilities=_all_available_capabilities(),
+                constraints=PlannerConstraints(),
+            ).build()
+
+    def test_validator_rejects_missing_artifact_producer(self):
+        manifest = _make_manifest(locked_target=True)
+        plan = WorkflowPlan(
+            strategy_id="broken",
+            steps=[
+                WorkflowStep(
+                    step_id="docking",
+                    action_type=ActionType.MOLECULAR_DOCKING,
+                    inputs=[
+                        item for item in _step_by_action(
+                            WorkflowGraphBuilder(
+                                draft=PlannerDraft(
+                                    strategy_id="ok",
+                                    actions=[
+                                        PlannedActionIntent(
+                                            action_type=ActionType.MOLECULAR_DOCKING,
+                                            importance="required",
+                                        )
+                                    ],
+                                ),
+                                input_manifest=manifest,
+                                capabilities=_all_available_capabilities(),
+                                constraints=PlannerConstraints(),
+                            ).build().plan,
+                            ActionType.MOLECULAR_DOCKING,
+                        ).inputs
+                    ],
+                    outputs=[],
+                )
+            ],
+        )
+
+        with pytest.raises(PlanningValidationError, match="required artifact"):
+            validate_workflow_plan(plan, input_manifest=manifest)
 
 
 # ── ToolUsePlannerAgent Tests ─────────────────────────────────────────

@@ -12,6 +12,7 @@ from autovs.planning.graph_builder import (
     PlannedActionIntent, PlannerConstraints, PlannerDraft, PlannerResult,
     PlanningAlternative, PlanningDecision, WorkflowGraphBuilder,
 )
+from autovs.planning.validator import validate_planner_result, validate_workflow_plan
 from autovs.planning.scoring import (
     StepCostEstimate, StepRiskEstimate, candidate_score,
     estimate_step_cost, estimate_step_risk,
@@ -28,4 +29,5 @@ __all__ = [
     "WorkflowGraphBuilder",
     "candidate_score", "estimate_step_cost", "estimate_step_risk",
     "find_consumers", "find_producers", "get_artifact", "get_contract",
+    "validate_planner_result", "validate_workflow_plan",
 ]

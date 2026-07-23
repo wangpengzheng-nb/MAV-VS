@@ -273,6 +273,7 @@ class PipelineService:
         task_dir = Path(task["task_dir"])
         request = TaskRequest.model_validate(task["request"])
         rejected: list[dict] = []
+        selected_strategy: dict[str, Any] = {}
 
         # 读取当前进度，判断哪些阶段已完成（用于续跑跳过）
         def _phase_done(phase_id: str) -> bool:
@@ -348,10 +349,17 @@ class PipelineService:
             plan_path = task_dir / "workflow_plan.json"
             if _phase_done("strategy_selection") and plan_path.is_file():
                 plan = WorkflowPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+                for candidate in planning.get("evolved_strategies", []):
+                    if plan.strategy_id in {
+                        str(candidate.get("strategy_id", "")),
+                        str(candidate.get("strategy_name", "")),
+                    }:
+                        selected_strategy = candidate
+                        break
             elif use_llm_planning:
                 self.store.update_progress(task_id, "strategy_selection", JobStatus.RUNNING,
                                            message="按投票排名校验候选策略")
-                _, plan, rejected = choose_executable_strategy(
+                selected_strategy, plan, rejected = choose_executable_strategy(
                     planning["ranked_names"], planning["evolved_strategies"], input_manifest=manifest,
                 )
                 self.store.update_progress(
@@ -368,6 +376,11 @@ class PipelineService:
                 plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
                 self._index_artifact(task_id, "workflow_plan", plan_path)
                 planning = {"mode": "deterministic_cpu_baseline", "ranked_names": [plan.strategy_id]}
+                selected_strategy = {
+                    "strategy_id": plan.strategy_id,
+                    "strategy_name": plan.strategy_id,
+                    "pipeline": [step.model_dump(mode="json") for step in plan.steps],
+                }
                 self.store.update_progress(task_id, "strategy_selection", JobStatus.SUCCEEDED,
                                            message="已选择确定性 CPU 基线策略",
                                            metadata={"strategy_id": plan.strategy_id})
@@ -379,8 +392,10 @@ class PipelineService:
             planning_result_path = task_dir / "tool_planning.json"
             planner_warnings: list[str] = []
 
-            if planner_mode == "tool_use" and not _phase_done("strategy_selection"):
-                # 仅在首次执行时规划；续跑复用已有 plan
+            if planner_mode == "tool_use" and planning_result_path.is_file():
+                plan = WorkflowPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+            elif planner_mode == "tool_use":
+                # 仅在 ToolUsePlanner checkpoint 不存在时规划；续跑复用已有 plan。
                 try:
                     from src.agents.tool_use_planner import ToolUsePlannerAgent
                     from autovs.planning import PlannerConstraints
@@ -389,7 +404,10 @@ class PipelineService:
                         settings=self.settings, llm_client=None,
                     )
                     planner_result = planner.plan(
-                        strategy=planning.get("evolved_strategies", [{}])[0] if planning.get("evolved_strategies") else {},
+                        strategy=selected_strategy or (
+                            planning.get("evolved_strategies", [{}])[0]
+                            if planning.get("evolved_strategies") else {}
+                        ),
                         input_manifest=manifest,
                         constraints=PlannerConstraints(cpu_only=getattr(request, "cpu_only", False)),
                     )

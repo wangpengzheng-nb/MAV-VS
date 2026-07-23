@@ -8,6 +8,8 @@ from autovs.dag import (
     SCREENING_LIBRARY, NORMALIZED_LIBRARY, TARGET_STRUCTURE,
     POCKET_CENTER, POCKET_SIZE, PREPARED_LIBRARY,
     RECEPTOR_PDBQT, SCORES_CSV, TOP_HITS,
+    STANDARDIZED_LIBRARY, IONIZED_LIBRARY, ENUMERATED_3D_SDF,
+    LIGAND_PDBQT, CONVERTED_FORMAT, MOLECULE_PREP_REPORTS,
 )
 from autovs.planning.contracts import (
     ACTION_CONTRACTS, ARTIFACT_REGISTRY, ArtifactSchema, ActionIOContract,
@@ -69,6 +71,18 @@ class TestActionContracts:
     def test_input_validation_outputs_normalized_library(self):
         c = get_contract(ActionType.INPUT_VALIDATION)
         assert NORMALIZED_LIBRARY in c.outputs
+
+    def test_new_molecule_artifacts_are_registered(self):
+        for key in [
+            STANDARDIZED_LIBRARY, IONIZED_LIBRARY, ENUMERATED_3D_SDF,
+            LIGAND_PDBQT, CONVERTED_FORMAT, MOLECULE_PREP_REPORTS,
+        ]:
+            assert get_artifact(key) is not None
+
+    def test_pdbqt_parameterization_outputs_ligand_pdbqt_not_sdf_alias(self):
+        c = get_contract(ActionType.PDBQT_PARAMETERIZATION)
+        assert LIGAND_PDBQT in c.outputs
+        assert PREPARED_LIBRARY not in c.outputs
 
     def test_find_producers_returns_correct(self):
         producers = find_producers(TOP_HITS)

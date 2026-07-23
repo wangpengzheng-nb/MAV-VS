@@ -18,7 +18,9 @@ from autovs.schemas import ActionType, StrictModel
 from autovs.dag import (
     SCREENING_LIBRARY, NORMALIZED_LIBRARY, TARGET_STRUCTURE,
     POCKET_RESOLUTION, POCKET_CENTER, POCKET_SIZE,
-    PREPARED_LIBRARY, MANIFEST_CSV, RECEPTOR_PDB, RECEPTOR_PDBQT,
+    PREPARED_LIBRARY, STANDARDIZED_LIBRARY, IONIZED_LIBRARY,
+    ENUMERATED_3D_SDF, LIGAND_PDBQT, CONVERTED_FORMAT,
+    MOLECULE_PREP_REPORTS, MANIFEST_CSV, RECEPTOR_PDB, RECEPTOR_PDBQT,
     DOCKED_POSES, SCORES_CSV, SELECTED_POSES, COMPLEX_INDEX,
     PLIP_SCORES, TOP_HITS, HIT_COUNT,
 )
@@ -76,6 +78,37 @@ ARTIFACT_REGISTRY: dict[str, ArtifactSchema] = {
         artifact_key=PREPARED_LIBRARY,
         description="准备完成的配体库（SDF 格式，含 3D 坐标）",
         allowed_formats=["SDF", "sdf"],
+    ),
+    STANDARDIZED_LIBRARY: ArtifactSchema(
+        artifact_key=STANDARDIZED_LIBRARY,
+        description="ChEMBL 标准化后的 strict SMI 分子库",
+        allowed_formats=["strict_smi_v1", "smi"],
+    ),
+    IONIZED_LIBRARY: ArtifactSchema(
+        artifact_key=IONIZED_LIBRARY,
+        description="Dimorphite-DL pH 枚举后的 strict SMI 分子库",
+        allowed_formats=["strict_smi_v1", "smi"],
+    ),
+    ENUMERATED_3D_SDF: ArtifactSchema(
+        artifact_key=ENUMERATED_3D_SDF,
+        description="Gypsum-DL/RDKit 生成的 3D SDF 配体库",
+        allowed_formats=["SDF", "sdf"],
+    ),
+    LIGAND_PDBQT: ArtifactSchema(
+        artifact_key=LIGAND_PDBQT,
+        description="Meeko 生成的配体 PDBQT 文件，仅供 Vina/PDBQT 路线使用",
+        allowed_formats=["PDBQT", "pdbqt"],
+    ),
+    CONVERTED_FORMAT: ArtifactSchema(
+        artifact_key=CONVERTED_FORMAT,
+        description="Open Babel 转换得到的分子格式文件",
+        allowed_formats=["SMI", "SDF", "PDB", "MOL2", "PDBQT"],
+    ),
+    MOLECULE_PREP_REPORTS: ArtifactSchema(
+        artifact_key=MOLECULE_PREP_REPORTS,
+        description="分子准备工具产生的诊断报告集合",
+        allowed_formats=["JSON", "json", "list"],
+        multiple=True,
     ),
     MANIFEST_CSV: ArtifactSchema(
         artifact_key=MANIFEST_CSV,
@@ -210,28 +243,28 @@ ACTION_CONTRACTS: dict[ActionType, ActionIOContract] = {
         scientific_role="ChEMBL 标准化 + 去盐",
         required_inputs=[NORMALIZED_LIBRARY],
         optional_inputs=[],
-        outputs=[NORMALIZED_LIBRARY],  # 更新归一化库
+        outputs=[STANDARDIZED_LIBRARY, NORMALIZED_LIBRARY, MOLECULE_PREP_REPORTS],
     ),
     ActionType.IONIZATION_ENUMERATION: ActionIOContract(
         action_type=ActionType.IONIZATION_ENUMERATION,
         scientific_role="pH 依赖离子化状态枚举",
         required_inputs=[NORMALIZED_LIBRARY],
         optional_inputs=[],
-        outputs=[NORMALIZED_LIBRARY],
+        outputs=[IONIZED_LIBRARY, NORMALIZED_LIBRARY, MOLECULE_PREP_REPORTS],
     ),
     ActionType.LIGAND_3D_ENUMERATION: ActionIOContract(
         action_type=ActionType.LIGAND_3D_ENUMERATION,
         scientific_role="3D-ready 配体枚举（质子化+互变+立体+构象）",
         required_inputs=[NORMALIZED_LIBRARY],
         optional_inputs=[],
-        outputs=[PREPARED_LIBRARY, MANIFEST_CSV],
+        outputs=[ENUMERATED_3D_SDF, PREPARED_LIBRARY, MOLECULE_PREP_REPORTS],
     ),
     ActionType.PDBQT_PARAMETERIZATION: ActionIOContract(
         action_type=ActionType.PDBQT_PARAMETERIZATION,
         scientific_role="生成配体 PDBQT 文件（Gasteiger 电荷 + AutoDock 原子类型）",
         required_inputs=[PREPARED_LIBRARY],
         optional_inputs=[],
-        outputs=[PREPARED_LIBRARY],
+        outputs=[LIGAND_PDBQT, MOLECULE_PREP_REPORTS],
     ),
     ActionType.MOLECULAR_DOCKING: ActionIOContract(
         action_type=ActionType.MOLECULAR_DOCKING,
@@ -298,7 +331,7 @@ ACTION_CONTRACTS: dict[ActionType, ActionIOContract] = {
         scientific_role="分子格式转换（SMI↔SDF↔PDB↔MOL2）",
         required_inputs=[NORMALIZED_LIBRARY],
         optional_inputs=[],
-        outputs=[PREPARED_LIBRARY],
+        outputs=[CONVERTED_FORMAT, PREPARED_LIBRARY, MOLECULE_PREP_REPORTS],
     ),
     # ── 未实现处理器但已注册的 action ──
     ActionType.TARGET_STRUCTURE_PREDICTION: ActionIOContract(
