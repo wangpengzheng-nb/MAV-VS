@@ -39,6 +39,10 @@ ENUMERATED_3D_SDF = "enumerated_3d_sdf"        # Path: Gypsum/RDKit 3D SDF
 LIGAND_PDBQT = "ligand_pdbqt"                  # Path: Meeko ligand PDBQT
 CONVERTED_FORMAT = "converted_format"          # Path: Open Babel converted file
 MOLECULE_PREP_REPORTS = "molecule_prep_reports"  # list[Path]
+AF3_STATE = "af3_state"                         # Path: AF3 async job state JSON
+AF3_REPORT = "af3_report"                       # Path: AF3 prediction report JSON
+GROMACS_STATE = "gromacs_state"                 # Path: GROMACS Slurm state JSON
+GROMACS_REPORT = "gromacs_report"               # Path: GROMACS run report JSON
 MANIFEST_CSV = "manifest_csv"                 # Path: molecule manifest CSV
 RECEPTOR_PDB = "receptor_pdb"                 # Path: cleaned receptor PDB
 RECEPTOR_PDBQT = "receptor_pdbqt"             # Path: receptor PDBQT
@@ -88,6 +92,28 @@ def _bind_target_structure(outputs: dict[str, Any], state: dict[str, Any]) -> No
                     for item in outputs.get("candidates", [])}
         state["_structure_candidates"] = candidates
         state["_structure_metadata"] = metadata
+
+
+def _resolve_target_structure_prediction(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "research_path": state["_research_path"],
+        "sequence": kwargs.get("sequence"),
+        "input_json": kwargs.get("input_json"),
+        "name": kwargs.get("name"),
+        "seed": kwargs.get("seed", 1),
+        "chain_id": kwargs.get("chain_id", "A"),
+        "wait_seconds": kwargs.get("wait_seconds", 0),
+        "poll_interval": kwargs.get("poll_interval", 30),
+    }
+
+
+def _bind_target_structure_prediction(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    if outputs.get("target_structure"):
+        state[TARGET_STRUCTURE] = outputs["target_structure"]
+    if outputs.get("af3_state"):
+        state[AF3_STATE] = outputs["af3_state"]
+    if outputs.get("af3_report"):
+        state[AF3_REPORT] = outputs["af3_report"]
 
 
 def _resolve_pocket_definition(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -361,11 +387,33 @@ def _bind_format_conversion(outputs: dict[str, Any], state: dict[str, Any]) -> N
     _remember_report(outputs, state, "conversion_report")
 
 
+def _resolve_gromacs_md(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "receptor_pdb": state[RECEPTOR_PDB],
+        "selected_poses": state[SELECTED_POSES],
+        "max_ligands": kwargs.get("max_ligands"),
+        "simulation_ns": kwargs.get("simulation_ns"),
+        "force_field": kwargs.get("force_field", "amber99sb-ildn"),
+        "water_model": kwargs.get("water_model", "tip3p"),
+        "ph": kwargs.get("ph", 7.4),
+    }
+
+
+def _bind_gromacs_md(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    if outputs.get("scores_csv"):
+        state[SCORES_CSV] = outputs["scores_csv"]
+    if outputs.get("gromacs_state"):
+        state[GROMACS_STATE] = outputs["gromacs_state"]
+    if outputs.get("gromacs_report"):
+        state[GROMACS_REPORT] = outputs["gromacs_report"]
+
+
 # ── Registry maps ────────────────────────────────────────────────────
 
 INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.INPUT_VALIDATION: _resolve_input_validation,
     ActionType.TARGET_STRUCTURE_ACQUISITION: _resolve_target_structure,
+    ActionType.TARGET_STRUCTURE_PREDICTION: _resolve_target_structure_prediction,
     ActionType.POCKET_DEFINITION: _resolve_pocket_definition,
     ActionType.MOLECULE_STANDARDIZATION: _resolve_molecule_prep,
     ActionType.CONFORMER_GENERATION: _resolve_molecule_prep,
@@ -383,11 +431,14 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.LIGAND_3D_ENUMERATION: _resolve_ligand_3d_enumeration,
     ActionType.PDBQT_PARAMETERIZATION: _resolve_pdbqt_parameterization,
     ActionType.FORMAT_CONVERSION: _resolve_format_conversion,
+    ActionType.SHORT_MD: _resolve_gromacs_md,
+    ActionType.MOLECULAR_DYNAMICS: _resolve_gromacs_md,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.INPUT_VALIDATION: _bind_input_validation,
     ActionType.TARGET_STRUCTURE_ACQUISITION: _bind_target_structure,
+    ActionType.TARGET_STRUCTURE_PREDICTION: _bind_target_structure_prediction,
     ActionType.POCKET_DEFINITION: _bind_pocket_definition,
     ActionType.MOLECULE_STANDARDIZATION: _bind_molecule_prep,
     ActionType.CONFORMER_GENERATION: _bind_molecule_prep,
@@ -405,6 +456,8 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.LIGAND_3D_ENUMERATION: _bind_ligand_3d_enumeration,
     ActionType.PDBQT_PARAMETERIZATION: _bind_pdbqt_parameterization,
     ActionType.FORMAT_CONVERSION: _bind_format_conversion,
+    ActionType.SHORT_MD: _bind_gromacs_md,
+    ActionType.MOLECULAR_DYNAMICS: _bind_gromacs_md,
 }
 
 
@@ -432,6 +485,8 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.IONIZATION_ENUMERATION: "molecule_standardization",
     ActionType.PDBQT_PARAMETERIZATION: "molecule_standardization",
     ActionType.FORMAT_CONVERSION: "molecule_standardization",
+    ActionType.SHORT_MD: "final_ranking",
+    ActionType.MOLECULAR_DYNAMICS: "final_ranking",
 }
 
 
@@ -586,6 +641,15 @@ def execute_workflow_plan(
         try:
             job = tools.submit(task_id, step, step_inputs, background=False)
             completed_job = store.get_job(job.job_id)
+            if completed_job and completed_job.status == JobStatus.PAUSED:
+                if phase_id:
+                    update_progress(
+                        phase_id, JobStatus.PAUSED,
+                        message=f"{step.step_id} 已提交外部长任务，等待后续 resume",
+                        metadata={"step_id": step.step_id, "job_id": job.job_id,
+                                  "action_type": step.action_type.value},
+                    )
+                raise TaskPaused()
             if not completed_job or completed_job.status != JobStatus.SUCCEEDED:
                 error_msg = completed_job.message if completed_job else f"step {step.step_id} disappeared"
                 if step.action_type == ActionType.POCKET_DEFINITION:

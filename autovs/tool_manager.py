@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from autovs.capabilities import list_capabilities
+from autovs.af3 import ToolPending
 from autovs.config import Settings
 from autovs.db import StateStore
 from autovs.library import normalize_smi_library, verify_default_library
@@ -151,6 +152,24 @@ class ToolManager:
                         continue  # shared read-only assets are referenced by checksum, not exposed as task artifacts
                     self.store.add_artifact(task["task_id"], job_id, name, value, value.suffix.lstrip(".").upper(), sha256_file(value))
             self.store.update_job(job_id, JobStatus.SUCCEEDED, message=json.dumps(_jsonable(outputs), ensure_ascii=False))
+        except ToolPending as exc:
+            payload = {
+                "job_id": job_id,
+                "task_id": task["task_id"],
+                "step_id": step.step_id,
+                "action_type": step.action_type.value,
+                "message": str(exc),
+                **exc.payload,
+            }
+            pending_path = exc.state_path or (work_dir / "pending.json")
+            if not pending_path.is_file():
+                pending_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.store.add_artifact(task["task_id"], job_id, "pending_state", pending_path,
+                                    pending_path.suffix.lstrip(".").upper(), sha256_file(pending_path))
+            self.store.update_job(job_id, JobStatus.PAUSED, message=json.dumps(_jsonable({
+                **payload,
+                "pending_state": pending_path,
+            }), ensure_ascii=False), slurm_job_id=str(payload.get("slurm_job_id") or "") or None)
         except Exception as exc:
             failure_path = work_dir / "failure.json"
             failure_path.write_text(json.dumps({
@@ -236,6 +255,14 @@ class ToolManager:
                 research_path, work_dir, limit=min(int(inputs.get("limit", 5)), 5),
                 selected_strategy_id=str(inputs.get("selected_strategy_id", "")),
             )
+        if action == ActionType.TARGET_STRUCTURE_PREDICTION:
+            from autovs.af3 import predict_structure
+            research_path = ensure_within(inputs["research_path"], [work_dir.parent.parent], must_exist=True)
+            return predict_structure(
+                research_path=research_path,
+                work_dir=work_dir,
+                parameters=step.parameters | {k: v for k, v in inputs.items() if k != "research_path"},
+            )
         if action == ActionType.POCKET_DEFINITION:
             protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
             if "research" in inputs:
@@ -308,6 +335,18 @@ class ToolManager:
             return self._prepare_pdbqt(inputs, work_dir)
         if action == ActionType.FORMAT_CONVERSION:
             return self._convert_format(inputs, work_dir)
+        if action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
+            from autovs.gromacs import submit_gromacs_md
+            receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
+            selected = ensure_within(inputs["selected_poses"], [self.settings.task_root], must_exist=True)
+            return submit_gromacs_md(
+                receptor_pdb=receptor,
+                selected_poses=selected,
+                work_dir=work_dir,
+                settings=self.settings,
+                parameters=step.parameters | inputs,
+                short=action == ActionType.SHORT_MD,
+            )
         raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
 
     def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:

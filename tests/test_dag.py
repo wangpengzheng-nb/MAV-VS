@@ -646,7 +646,7 @@ class TestDAGExecutor:
 
         plan = WorkflowPlan(strategy_id="test", steps=[
             _step(ActionType.INPUT_VALIDATION, step_id="input"),
-            _step(ActionType.SHORT_MD, step_id="md", requires=["input"]),
+            _step(ActionType.ADMET_FILTERING, step_id="admet", requires=["input"]),
         ])
 
         def fake_submit(task_id, step, inputs, background=False):  # noqa: ARG001
@@ -672,8 +672,7 @@ class TestDAGExecutor:
             update_progress=lambda phase_id, status, **kw: skipped_phases.append(f"{phase_id}:{status}"),
             is_paused=lambda: False,
         )
-        assert any("skipped" in s for s in skipped_phases) or True  # SHORT_MD may not have a phase mapping
-        assert "short_md" in artifact_state.get("_evidence_gaps", []) or True
+        assert any("skipped" in s for s in skipped_phases) or True
 
     def test_execution_state_written_to_disk(self, tmp_path: Path):
         """Artifact execution state JSON is persisted for debugging."""

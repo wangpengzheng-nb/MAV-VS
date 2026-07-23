@@ -689,7 +689,7 @@ lig_atoms = lig_lines[2:-1]
 total = prot_count + lig_count
 with open('complex.gro', 'w') as f:
     f.write(f'Protein-Ligand complex\\n')
-    f.write(f'{total:5d}\\n')
+    f.write(f'{{total:5d}}\\n')
     for l in prot_atoms:
         f.write(l)
     for l in lig_atoms:

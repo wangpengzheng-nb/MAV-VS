@@ -326,25 +326,38 @@ class PipelineService:
             readiness = planning.get("research", {}).get("structure_readiness", {})
             if (use_llm_planning and not request.protein_path
                     and readiness.get("predicted_structure_required")):
-                gap = {
-                    "action_type": ActionType.TARGET_STRUCTURE_PREDICTION.value,
-                    "availability": "unavailable",
-                    "reason": "AlphaFold/Boltz structure prediction adapter is not configured yet",
-                    "recommendations": readiness.get("acquisition_recommendations", []),
-                }
-                gap_path = task_dir / "structure_capability_gap.json"
-                gap_path.write_text(json.dumps(gap, ensure_ascii=False, indent=2), encoding="utf-8")
-                self._index_artifact(task_id, "structure_capability_gap", gap_path)
-                self.store.update_progress(
-                    task_id, "strategy_selection", JobStatus.FAILED,
-                    message="策略需要预测靶结构，但 AlphaFold/Boltz 工具尚未接入",
-                    error=gap["reason"], metadata=gap,
+                prediction_cap = next(
+                    (cap for cap in list_capabilities(self.settings)
+                     if cap.action_type == ActionType.TARGET_STRUCTURE_PREDICTION),
+                    None,
                 )
-                raise RuntimeError(
-                    "capability gap: target_structure_prediction is required because no verified "
-                    "experimental holo structure is available; configure an AlphaFold/Boltz adapter"
-                )
-
+                if prediction_cap and prediction_cap.availability != "unavailable":
+                    self._warnings.append(
+                        "未找到可用实验结构，将通过 target_structure_prediction 节点提交 AlphaFold3 任务"
+                    )
+                else:
+                    reason = (
+                        prediction_cap.reason if prediction_cap
+                        else "AlphaFold/Boltz structure prediction adapter is not configured yet"
+                    )
+                    gap = {
+                        "action_type": ActionType.TARGET_STRUCTURE_PREDICTION.value,
+                        "availability": "unavailable",
+                        "reason": reason,
+                        "recommendations": readiness.get("acquisition_recommendations", []),
+                    }
+                    gap_path = task_dir / "structure_capability_gap.json"
+                    gap_path.write_text(json.dumps(gap, ensure_ascii=False, indent=2), encoding="utf-8")
+                    self._index_artifact(task_id, "structure_capability_gap", gap_path)
+                    self.store.update_progress(
+                        task_id, "strategy_selection", JobStatus.FAILED,
+                        message="策略需要预测靶结构，但 AlphaFold3/Boltz 工具尚未可用",
+                        error=gap["reason"], metadata=gap,
+                    )
+                    raise RuntimeError(
+                        "capability gap: target_structure_prediction is required because no verified "
+                        f"experimental holo structure is available; {reason}"
+                    )
             # ── 阶段3: 策略选择 ──
             plan_path = task_dir / "workflow_plan.json"
             if _phase_done("strategy_selection") and plan_path.is_file():

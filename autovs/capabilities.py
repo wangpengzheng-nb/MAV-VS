@@ -114,7 +114,13 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
             elif not has_gnina:
                 availability, reason = "degraded", "GNINA unavailable; CPU smina only"
         elif action == ActionType.TARGET_STRUCTURE_PREDICTION:
-            availability, reason = "unavailable", "AlphaFold/Boltz structure prediction adapter is not configured yet"
+            try:
+                from autovs.af3 import af3_health
+                ok, msg = af3_health()
+            except Exception as exc:
+                ok, msg = False, f"AF3 health check failed: {type(exc).__name__}: {exc}"
+            if not ok:
+                availability, reason = "unavailable", msg
         elif action == ActionType.POCKET_DEFINITION:
             plip_cfg = settings.executor_config("plip")
             if not plip_cfg or not plip_cfg.exists(str(PROJECT_ROOT)):
@@ -140,6 +146,8 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
             gromacs_cfg = settings.executor_config("gromacs")
             if not gromacs_cfg or not gromacs_cfg.exists(str(PROJECT_ROOT)):
                 availability, reason = "unavailable", "GROMACS Apptainer image not found"
+            elif not _exists(settings.executable("apptainer")):
+                availability, reason = "unavailable", "Apptainer binary not found"
             elif not _exists(settings.executable("sbatch")):
                 availability, reason = "unavailable", "Slurm sbatch not found"
             else:

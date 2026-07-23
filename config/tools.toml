@@ -83,6 +83,14 @@ health_check = "gmx --version"
 description = "GROMACS 分子动力学模拟（Apptainer 容器）"
 gpu_required = true
 
+[executors.alphafold3]
+name = "alphafold3"
+executor = "python_module"
+module = "autovs.af3"
+health_check = "AF3_SERVER_URL + bearer token + /health"
+description = "Self-hosted AlphaFold3 FastAPI gateway async job adapter"
+gpu_required = true
+
 [executors.conda]
 name = "conda"
 executor = "subprocess"
