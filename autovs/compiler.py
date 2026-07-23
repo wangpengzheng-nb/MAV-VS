@@ -251,9 +251,39 @@ def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest 
     return plan
 
 
+def _adapt_strategy_to_manifest(strategy: dict[str, Any], input_manifest: InputManifest | None) -> dict[str, Any]:
+    """Drop structure-prediction gaps when the user already supplied a locked target structure."""
+    if input_manifest is None or not input_manifest.target_asset.locked or not input_manifest.target_asset.path:
+        return strategy
+    adapted = dict(strategy)
+    for key in ("pipeline", "updated_pipeline", "pipeline_steps"):
+        steps = adapted.get(key)
+        if isinstance(steps, list):
+            adapted[key] = [
+                step for step in steps
+                if str(step.get("action_type", "")) != ActionType.TARGET_STRUCTURE_PREDICTION.value
+            ]
+    missing = [
+        item for item in adapted.get("missing_capabilities", [])
+        if not str(item).startswith(f"{ActionType.TARGET_STRUCTURE_PREDICTION.value}:")
+    ]
+    required = [
+        item for item in adapted.get("required_capabilities", [])
+        if str(item) != ActionType.TARGET_STRUCTURE_PREDICTION.value
+    ]
+    adapted["missing_capabilities"] = missing
+    adapted["required_capabilities"] = required
+    profile = adapted.get("target_profile")
+    if isinstance(profile, dict):
+        adapted["target_profile"] = {**profile, "has_experimental_structure": True}
+    if not missing and adapted.get("execution_status") in {"partially_executable", "future_capability_required"}:
+        adapted["execution_status"] = "currently_executable"
+    return adapted
+
+
 def choose_executable_strategy(ranked_names: list[str], strategies: list[dict], *,
                                input_manifest: InputManifest | None = None) -> tuple[dict, WorkflowPlan, list[dict]]:
-    by_name = {str(s.get("strategy_name", "")): s for s in strategies}
+    by_name = {str(s.get("strategy_name", "")): _adapt_strategy_to_manifest(s, input_manifest) for s in strategies}
     rejected: list[dict] = []
     candidates = ranked_names + [name for name in by_name if name not in ranked_names]
     for name in candidates:

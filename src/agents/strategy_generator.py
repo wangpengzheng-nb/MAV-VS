@@ -194,6 +194,9 @@ class StrategyGeneratorAgent:
         structures = research_report.get("verified_pdb_structures") or []
         activities = research_report.get("chembl_activities") or []
         intent = research_report.get("intent") or {}
+        execution_context = research_report.get("_execution_context") if isinstance(research_report.get("_execution_context"), dict) else {}
+        target_binding = execution_context.get("target") if isinstance(execution_context.get("target"), dict) else {}
+        uploaded_target_locked = bool(target_binding.get("locked") and target_binding.get("source") == "user")
         query = research_report.get("_user_query") or intent.get("raw_query", "")
         gene = research_report.get("gene_symbol") or research_report.get("target_gene") or ""
         target_name = research_report.get("target_name") or research_report.get("protein_name") or gene or "Unknown target"
@@ -210,11 +213,13 @@ class StrategyGeneratorAgent:
         best = next(iter(holo or structures), {}) if structures else {}
         best_pdb = str(readiness.get("recommended_pdb_id") or research_report.get("recommended_pdb_for_docking") or best.get("pdb_id") or "")
         best_res = cls._as_float(km.get("best_pdb_resolution") or best.get("resolution"))
-        has_structure = bool(structures or readiness.get("experimental_holo_available") or readiness.get("experimental_apo_available"))
-        predicted_required = bool(readiness.get("predicted_structure_required"))
+        has_structure = bool(uploaded_target_locked or structures or readiness.get("experimental_holo_available") or readiness.get("experimental_apo_available"))
+        predicted_required = False if uploaded_target_locked else bool(readiness.get("predicted_structure_required"))
         selectivity, excluded = cls._extract_user_constraints(query, intent)
         selectivity.extend(str(item) for item in km.get("selectivity_residues", []) if item)
         refs = cls._evidence_refs(best_pdb, best_res, activity_range, structures, activities, text)
+        if uploaded_target_locked:
+            refs.insert(0, "uploaded_target_structure:locked")
 
         return StrategyContext(
             target_name=target_name, gene_symbol=gene, uniprot_id=uniprot_id, user_query=query,

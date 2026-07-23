@@ -97,3 +97,26 @@ def test_ranked_strategy_falls_back_after_binding_violation():
     assert selected["strategy_name"] == "fallback"
     assert plan.strategy_id == "fallback"
     assert rejected[0]["strategy_name"] == "top"
+
+
+def test_uploaded_structure_removes_prediction_only_gap():
+    strategy = {
+        "strategy_name": "uploaded pdb docking",
+        "execution_status": "partially_executable",
+        "missing_capabilities": ["target_structure_prediction: AlphaFold/Boltz target structure prediction adapter"],
+        "required_capabilities": ["target_structure_prediction", "molecular_docking"],
+        "pipeline": [
+            {"step_id": "predict", "action_type": "target_structure_prediction"},
+            {"step_id": "dock", "action_type": "molecular_docking"},
+        ],
+    }
+
+    selected, plan, rejected = choose_executable_strategy(
+        ["uploaded pdb docking"], [strategy], input_manifest=_manifest(target_locked=True),
+    )
+
+    assert selected["execution_status"] == "currently_executable"
+    assert selected["missing_capabilities"] == []
+    assert rejected == []
+    assert ActionType.TARGET_STRUCTURE_PREDICTION not in [step.action_type for step in plan.steps]
+    assert plan.strategy_id == "uploaded pdb docking"

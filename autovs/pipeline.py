@@ -274,6 +274,7 @@ class PipelineService:
         request = TaskRequest.model_validate(task["request"])
         rejected: list[dict] = []
         selected_strategy: dict[str, Any] = {}
+        run_warnings: list[str] = []
 
         # 读取当前进度，判断哪些阶段已完成（用于续跑跳过）
         def _phase_done(phase_id: str) -> bool:
@@ -332,7 +333,7 @@ class PipelineService:
                     None,
                 )
                 if prediction_cap and prediction_cap.availability != "unavailable":
-                    self._warnings.append(
+                    run_warnings.append(
                         "未找到可用实验结构，将通过 target_structure_prediction 节点提交 AlphaFold3 任务"
                     )
                 else:
@@ -451,7 +452,7 @@ class PipelineService:
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
                     self._index_artifact(task_id, "tool_planning_error", planning_error_path)
                     # 回退到 legacy compiler
-                    self._warnings.append(f"ToolUsePlanner 失败，回退到 legacy compile_strategy: {exc}")
+                    run_warnings.append(f"ToolUsePlanner 失败，回退到 legacy compile_strategy: {exc}")
                     if plan_path.is_file():
                         plan = WorkflowPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
                     else:
@@ -462,7 +463,7 @@ class PipelineService:
             # ── 阶段4-5: DAG 工作流执行 ──
             # 构建 artifact_state，将所有步骤交给 DAG executor 按拓扑顺序执行。
             artifact_state: dict[str, Any] = {
-                SCREENING_LIBRARY: normalized_library,
+                SCREENING_LIBRARY: request.library_path,
                 NORMALIZED_LIBRARY: normalized_library,
                 "_research_path": str(task_dir / "research.json") if (task_dir / "research.json").is_file() else "",
                 "_selected_strategy_id": plan.strategy_id,
@@ -477,7 +478,7 @@ class PipelineService:
                 store=self.store,
                 task_dir=task_dir,
                 request=request,
-                planning=planning,
+                planning={**planning, "warnings": run_warnings},
                 rejected_strategies=rejected,
                 update_progress=lambda phase_id, status, **kw: self.store.update_progress(
                     task_id, phase_id, status, **kw,

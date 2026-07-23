@@ -54,6 +54,7 @@ package-lock.json
 mock.pdb
 test.smi
 gmx_MMPBSA.log
+demo/
 
 # ── PPT 文件 ──
 虚拟筛选智能体系统.pptx
@@ -61,3 +62,7 @@ AutoVS-Agent_汇报演示.pptx
 
 # ── AlphaFold ──
 alphafold3-server-api-usage-skill/
+
+EGFR 零本地输入端到端 Demo.docx
+MAV-VS 端到端虚拟筛选验收方案.docx
+examples/

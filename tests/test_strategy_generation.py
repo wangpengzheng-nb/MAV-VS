@@ -59,6 +59,30 @@ def test_no_holo_structure_marks_prediction_gap():
     assert any("target_structure_prediction" in " ".join(item["missing_capabilities"]) for item in strategies)
 
 
+def test_uploaded_locked_structure_suppresses_prediction_gap(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    report = {
+        "target_name": "Apoptosis regulator Bcl-2",
+        "gene_symbol": "BCL2",
+        "structure_readiness": {"predicted_structure_required": True},
+        "_execution_context": {
+            "target": {"source": "user", "locked": True, "acquisition": "forbidden"},
+        },
+        "executive_summary": "Research did not select a replacement experimental structure.",
+    }
+
+    ctx = StrategyGeneratorAgent.build_strategy_context(report)
+    strategies = StrategyGeneratorAgent().generate_strategies(report)["strategies"]
+
+    assert ctx.has_experimental_structure is True
+    assert ctx.predicted_structure_required is False
+    assert ctx.evidence_refs[0] == "uploaded_target_structure:locked"
+    assert not any(
+        "target_structure_prediction" in item["required_capabilities"]
+        for item in strategies
+    )
+
+
 def test_offline_fallback_generates_eight_diverse_gap_aware_strategies(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     report = {
