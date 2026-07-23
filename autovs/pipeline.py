@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import os
 import shutil
 import threading
 import traceback
@@ -372,6 +373,58 @@ class PipelineService:
                                            metadata={"strategy_id": plan.strategy_id})
 
             _check_pause()
+
+            # ── 阶段3.5: 工具使用规划 ──
+            planner_mode = os.environ.get("AUTOVS_PLANNER_MODE", "tool_use")
+            planning_result_path = task_dir / "tool_planning.json"
+            planner_warnings: list[str] = []
+
+            if planner_mode == "tool_use" and not _phase_done("strategy_selection"):
+                # 仅在首次执行时规划；续跑复用已有 plan
+                try:
+                    from src.agents.tool_use_planner import ToolUsePlannerAgent
+                    from autovs.planning import PlannerConstraints
+
+                    planner = ToolUsePlannerAgent(
+                        settings=self.settings, llm_client=None,
+                    )
+                    planner_result = planner.plan(
+                        strategy=planning.get("evolved_strategies", [{}])[0] if planning.get("evolved_strategies") else {},
+                        input_manifest=manifest,
+                        constraints=PlannerConstraints(cpu_only=getattr(request, "cpu_only", False)),
+                    )
+                    plan = planner_result.plan
+                    planner_warnings = planner_result.warnings
+                    plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+                    planning_result_path.write_text(
+                        planner_result.model_dump_json(indent=2), encoding="utf-8",
+                    )
+                    self._index_artifact(task_id, "workflow_plan", plan_path)
+                    self._index_artifact(task_id, "tool_planning", planning_result_path)
+
+                    self.store.update_progress(
+                        task_id, "strategy_selection", JobStatus.SUCCEEDED,
+                        message=f"工具使用规划完成：{len(plan.steps)} 步骤，{len(planner_result.capability_gaps)} 能力缺口",
+                        metadata={
+                            "strategy_id": plan.strategy_id,
+                            "step_count": len(plan.steps),
+                            "capability_gaps": planner_result.capability_gaps,
+                            "planner_warnings": planner_warnings,
+                        },
+                    )
+                except Exception as exc:
+                    planning_error_path = task_dir / "tool_planning_error.json"
+                    planning_error_path.write_text(json.dumps({
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
+                    self._index_artifact(task_id, "tool_planning_error", planning_error_path)
+                    # 回退到 legacy compiler
+                    self._warnings.append(f"ToolUsePlanner 失败，回退到 legacy compile_strategy: {exc}")
+                    if plan_path.is_file():
+                        plan = WorkflowPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+                    else:
+                        raise RuntimeError(f"规划失败且无可回退计划: {exc}") from exc
 
             _check_pause()
 
