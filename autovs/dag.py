@@ -53,6 +53,7 @@ COMPLEX_INDEX = "complex_index"               # Path: complex index JSON
 PLIP_SCORES = "plip_scores"                   # Path: PLIP interaction scores CSV
 TOP_HITS = "top_hits"                         # Path: final ranked top-N CSV
 HIT_COUNT = "hit_count"                       # int
+ADMET_PREDICTIONS = "admet_predictions"        # Path: ADMET-AI predictions CSV
 
 
 # ── Input resolver / output binder registry ──────────────────────────
@@ -356,8 +357,17 @@ def _bind_pdbqt_parameterization(outputs: dict[str, Any], state: dict[str, Any])
 def _resolve_format_conversion(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     input_format = str(kwargs.get("input_format", "smi")).lower()
     output_format = str(kwargs.get("output_format", "sdf")).lower()
+    # Auto-detect best input: prefer already-prepared SDF over raw SMI
+    prepared = state.get(ENUMERATED_3D_SDF) or state.get(PREPARED_LIBRARY)
     if input_format in {"sdf", "mol", "mol2"}:
-        library_path = state.get(ENUMERATED_3D_SDF) or state.get(PREPARED_LIBRARY)
+        library_path = prepared
+    elif input_format == "smi":
+        # If an SDF is already available from a prior step, use it directly
+        if prepared and output_format in {"sdf", "pdbqt", "mol2", "pdb"}:
+            library_path = prepared
+            input_format = "sdf"
+        else:
+            library_path = _current_smi_library(state)
     elif input_format == "pdbqt":
         library_path = state.get(LIGAND_PDBQT)
     else:
@@ -385,6 +395,28 @@ def _bind_format_conversion(outputs: dict[str, Any], state: dict[str, Any]) -> N
         elif suffix in {".smi", ".smiles"}:
             state[NORMALIZED_LIBRARY] = converted
     _remember_report(outputs, state, "conversion_report")
+
+
+def _resolve_admet_filtering(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "scores_csv": state.get(SCORES_CSV, ""),
+        "atc_code": kwargs.get("atc_code"),
+        "timeout_seconds": kwargs.get("timeout_seconds", 7200),
+    }
+
+
+def _bind_admet_filtering(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    admet_csv = outputs.get("admet_predictions")
+    if admet_csv:
+        state[ADMET_PREDICTIONS] = admet_csv
+        # 将ADMET预测合并到对接得分CSV，供后续排序使用
+        scores_csv = state.get(SCORES_CSV)
+        if scores_csv and Path(scores_csv).is_file() and Path(admet_csv).is_file():
+            from pathlib import Path as _Path
+            task_dir = _Path(state.get("_task_dir", "."))
+            merged = _merge_score_csvs(_Path(scores_csv), _Path(admet_csv),
+                                       task_dir / "combined_scores_admet.csv")
+            state[SCORES_CSV] = str(merged)
 
 
 def _resolve_gromacs_md(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -433,6 +465,7 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.FORMAT_CONVERSION: _resolve_format_conversion,
     ActionType.SHORT_MD: _resolve_gromacs_md,
     ActionType.MOLECULAR_DYNAMICS: _resolve_gromacs_md,
+    # ADMET_FILTERING: _resolve_admet_filtering,  # 待 ToolManager._dispatch 适配完成后启用
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -458,6 +491,7 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.FORMAT_CONVERSION: _bind_format_conversion,
     ActionType.SHORT_MD: _bind_gromacs_md,
     ActionType.MOLECULAR_DYNAMICS: _bind_gromacs_md,
+    # ADMET_FILTERING: _bind_admet_filtering,  # 待 ToolManager._dispatch 适配完成后启用
 }
 
 
@@ -487,6 +521,7 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.FORMAT_CONVERSION: "molecule_standardization",
     ActionType.SHORT_MD: "final_ranking",
     ActionType.MOLECULAR_DYNAMICS: "final_ranking",
+    ActionType.ADMET_FILTERING: "final_ranking",
 }
 
 
@@ -558,6 +593,17 @@ def execute_workflow_plan(
         ``() -> bool`` — raises ``_TaskPaused`` internally if True.
     """
 
+    # ── Normalize plan dependencies: ensure FINAL_RANKING runs after ──
+    # INTERACTION_ANALYSIS so PLIP scores are available for scoring.
+    ia_steps = [s for s in plan.steps if s.action_type == ActionType.INTERACTION_ANALYSIS]
+    if ia_steps:
+        for step in plan.steps:
+            if step.action_type == ActionType.FINAL_RANKING:
+                ia_ids = [s.step_id for s in ia_steps
+                          if s.step_id not in step.requires]
+                if ia_ids:
+                    step.requires = list(dict.fromkeys(step.requires + ia_ids))
+
     # ── Build ready-set from topology ────────────────────────────
     completed: set[str] = set()
     ready: list[WorkflowStep] = [s for s in plan.steps if not s.requires]
@@ -597,6 +643,27 @@ def execute_workflow_plan(
 
         # ── Skip report_generation in the tool loop; handled post-DAG ──
         if step.action_type == ActionType.REPORT_GENERATION:
+            completed.add(step.step_id)
+            _enqueue_newly_ready()
+            continue
+
+        # ── Skip redundant physicochemical_filtering when library already prepared ──
+        # molecule_standardization (prepare_library) already applies MW, LogP, and
+        # PAINS filters.  Running physicochemical_filtering afterwards re-processes the
+        # raw SMILES input and overwrites the prepared SDF, breaking the property chain.
+        if (step.action_type == ActionType.PHYSICOCHEMICAL_FILTERING
+                and PREPARED_LIBRARY in artifact_state):
+            phase_id = ACTION_PHASE_MAP.get(step.action_type)
+            if phase_id:
+                update_progress(
+                    phase_id, JobStatus.SKIPPED,
+                    message=(
+                        f"跳过冗余 {step.step_id}：molecule_standardization 已包含"
+                        " MW/LogP/PAINS 过滤"
+                    ),
+                    metadata={"step_id": step.step_id, "action_type": step.action_type.value,
+                              "reason": "already_filtered_by_molecule_standardization"},
+                )
             completed.add(step.step_id)
             _enqueue_newly_ready()
             continue

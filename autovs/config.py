@@ -6,8 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from autovs.schemas import ExecutorConfig, ExecutorType
 
+# 加载项目.env文件中的环境变量，确保API密钥等在启动时可用
+_load_dotenv_result = load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

@@ -335,6 +335,8 @@ class ToolManager:
             return self._prepare_pdbqt(inputs, work_dir)
         if action == ActionType.FORMAT_CONVERSION:
             return self._convert_format(inputs, work_dir)
+        if action == ActionType.ADMET_FILTERING:
+            return self._run_admet(inputs, work_dir)
         if action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
             from autovs.gromacs import submit_gromacs_md
             receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
@@ -379,10 +381,14 @@ class ToolManager:
         scores_path = work_dir / "smina_scores.csv"
         score_rows = []
         best: dict[str, dict] = {}
-        for mol in Chem.SDMolSupplier(str(output), removeHs=False):
+        supplier = Chem.SDMolSupplier(str(output), removeHs=False, strictParsing=False)
+        for mol in supplier:
             if mol is None:
                 continue
-            source_id = mol.GetProp("source_id") if mol.HasProp("source_id") else (mol.GetProp("_Name") if mol.HasProp("_Name") else "")
+            try:
+                source_id = mol.GetProp("source_id") if mol.HasProp("source_id") else (mol.GetProp("_Name") if mol.HasProp("_Name") else "")
+            except (RuntimeError, KeyError):
+                continue
             affinity = None
             for prop in ("minimizedAffinity", "affinity", "SCORE"):
                 if mol.HasProp(prop):
@@ -393,7 +399,13 @@ class ToolManager:
             if affinity is None:
                 continue
             row = dict(manifest_rows.get(source_id, {}))
-            row.update({"source_id": source_id, "smiles": row.get("smiles", Chem.MolToSmiles(Chem.RemoveHs(mol))),
+            smiles = row.get("smiles", "")
+            if not smiles:
+                try:
+                    smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+                except Exception:
+                    smiles = ""
+            row.update({"source_id": source_id, "smiles": smiles,
                         "docking_affinity": affinity})
             if source_id not in best or affinity < float(best[source_id]["docking_affinity"]):
                 best[source_id] = row
@@ -773,6 +785,63 @@ class ToolManager:
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"converted": output, "conversion_report": report_path,
                 "molecules": report.get("molecules", 0)}
+
+
+    def _run_admet(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """ADMET-AI v2.0.1 预测：通过 conda run 调用 wrapper 脚本。"""
+        import shutil
+
+        scores_csv = ensure_within(inputs["scores_csv"], [self.settings.task_root], must_exist=True)
+        output_csv = work_dir / "admet_predictions.csv"
+
+        # 如果输出已存在且非空，直接复用（幂等性）
+        if output_csv.is_file() and output_csv.stat().st_size > 0:
+            return {"admet_predictions": output_csv, "molecule_count": -1}
+
+        # 找到 autovs-admet conda 环境中的 Python
+        conda_bin = self.settings.executable("conda")
+        if not conda_bin or not Path(str(conda_bin)).exists():
+            raise RuntimeError("conda 不可用：无法找到 conda 二进制")
+
+        env_python = Path(str(conda_bin)).parent.parent / "envs" / "autovs-admet" / "bin" / "python"
+        if not env_python.exists():
+            raise RuntimeError(
+                "autovs-admet conda 环境未安装。请运行: "
+                "conda create -n autovs-admet python=3.12 -y && "
+                "conda run -n autovs-admet pip install -e admet_ai/"
+            )
+
+        # 找到 wrapper 脚本
+        wrapper = Path(self.settings.config_path).parent.parent / "scripts" / "admet_wrapper.py"
+        if not wrapper.is_file():
+            raise RuntimeError(f"ADMET wrapper 脚本不存在: {wrapper}")
+
+        # 执行预测
+        result = run_argv(
+            [str(env_python), str(wrapper), str(scores_csv), str(output_csv)],
+            cwd=work_dir,
+            timeout=int(inputs.get("timeout_seconds", 7200)),
+            log_path=work_dir / "admet.log",
+        )
+        if result.returncode != 0 or not output_csv.is_file():
+            raise RuntimeError(
+                f"ADMET-AI 预测失败 (exit={result.returncode}): {result.stderr[-500:]}"
+            )
+
+        # 读取输出统计分子数
+        molecule_count = 0
+        try:
+            import csv as _csv
+            with output_csv.open(encoding="utf-8-sig", newline="") as handle:
+                molecule_count = sum(1 for _ in _csv.DictReader(handle))
+        except Exception:
+            pass
+
+        return {
+            "admet_predictions": output_csv,
+            "molecule_count": molecule_count,
+            "admet_log": work_dir / "admet.log",
+        }
 
 
 def _jsonable(outputs: dict[str, Any]) -> dict[str, Any]:

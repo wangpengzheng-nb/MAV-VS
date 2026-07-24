@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""ADMET-AI 预测 wrapper — 供 ToolManager 通过 subprocess 调用。
+"""ADMET-AI v2.0.1 预测 wrapper — 供 ToolManager 通过 conda run 调用。
 
 用法:
     python scripts/admet_wrapper.py <input_csv> <output_csv>
 
-从 autovs-admet conda 环境中运行（通过 ToolManager 的 run_argv 指定路径）。
+input_csv 至少包含 source_id 和 smiles 列。
+输出 CSV 包含原始列 + 104 个 ADMET 预测属性 + DrugBank 百分位。
+
+从 autovs-admet conda 环境中运行。
 """
 
 from __future__ import annotations
@@ -27,37 +30,53 @@ def main() -> None:
         print(f"输入文件不存在: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    # 读取输入 CSV（source_id, smiles）
+    # 读取输入 CSV（需要 source_id, smiles 列）
     molecules: list[dict[str, str]] = []
     with input_path.open(encoding="utf-8-sig", newline="") as handle:
-        for row in csv.DictReader(handle):
-            if row.get("smiles"):
-                molecules.append(row)
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if row.get("smiles", "").strip():
+                molecules.append({
+                    "source_id": row.get("source_id", "").strip(),
+                    "smiles": row["smiles"].strip(),
+                })
 
     if not molecules:
         print("输入 CSV 中没有有效分子", file=sys.stderr)
         sys.exit(1)
 
-    # 调用 ADMET-AI 预测
+    # 调用 ADMET-AI v2.0.1 预测
     try:
-        from admet_ai.admet_predict import predict  # type: ignore[import-untyped]
+        from admet_ai import ADMETModel  # type: ignore[import-untyped]
 
         smiles_list = [m["smiles"] for m in molecules]
-        results = predict(smiles_list)
+        model = ADMETModel()
+        preds_df = model.predict(smiles_list)
 
-        # 写入输出
+        # 将 source_id 加回去作为第一列
+        source_ids = [m["source_id"] for m in molecules]
+        preds_df.insert(0, "source_id", source_ids)
+
+        # 写入输出 CSV
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8", newline="") as handle:
-            if results:
-                writer = csv.DictWriter(handle, fieldnames=list(results[0].keys()))
-                writer.writeheader()
-                writer.writerows(results)
-        print(json.dumps({"status": "ok", "molecules": len(results)}))
-    except ImportError:
-        print("ADMET-AI 包未安装。请确认已在 autovs-admet 环境中运行: conda activate autovs-admet", file=sys.stderr)
+        preds_df.to_csv(output_path, index=False)
+
+        print(json.dumps({
+            "status": "ok",
+            "molecules": len(molecules),
+            "properties": len(preds_df.columns) - 1,
+        }))
+    except ImportError as exc:
+        print(
+            f"ADMET-AI 包未安装。请确认已在 autovs-admet 环境中运行: "
+            f"conda activate autovs-admet\n{exc}",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except Exception as exc:
         print(f"ADMET-AI 预测失败: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
 

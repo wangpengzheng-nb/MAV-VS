@@ -3,7 +3,6 @@
 .env.*
 *.key
 *.pem
-config/prompts.yaml
 
 # ── Python 缓存和虚拟环境 ──
 __pycache__/
@@ -55,6 +54,12 @@ mock.pdb
 test.smi
 gmx_MMPBSA.log
 demo/
+
+# ── E2E 测试文件 ──
+e2e_*.py
+e2e_*.sh
+e2e_*.json
+E2E_VALIDATION_REPORT.md
 
 # ── PPT 文件 ──
 虚拟筛选智能体系统.pptx

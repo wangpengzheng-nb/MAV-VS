@@ -18,7 +18,7 @@ from .models import (
 
 
 UNIPROT_RE = re.compile(r"\b(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b", re.I)
-TARGET_PREFIX_RE = re.compile(r"(?:靶点(?:基因)?|target(?:\s+gene)?)\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9_.-]{0,30})", re.I)
+TARGET_PREFIX_RE = re.compile(r"(?:靶(?:点|向)(?:基因|蛋白|蛋白质)?|target(?:\s+gene|\s+protein)?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9_.-]{0,30})", re.I)
 GENE_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9-]{1,20}\b")
 NOISE = {
     "PROTAC", "SMILES", "PDB", "JSON", "API", "IC50", "EC50", "ADMET", "RNA", "DNA",

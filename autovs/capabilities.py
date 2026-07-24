@@ -137,9 +137,23 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
             admet_cfg = settings.executor_config("admet_ai")
             if admet_cfg and admet_cfg.env:
                 conda = settings.executable("conda")
-                env_path = conda.parent.parent / "envs" / admet_cfg.env if conda else None
-                if not _exists(env_path):
+                env_python = conda.parent.parent / "envs" / admet_cfg.env / "bin" / "python" if conda else None
+                if not _exists(env_python):
                     availability, reason = "degraded", f"conda 环境 {admet_cfg.env} 未安装"
+                else:
+                    # 验证 admet_ai 可以在该环境中导入
+                    try:
+                        from autovs.security import run_argv as _run_argv
+                        smoke = _run_argv(
+                            [str(env_python), "-c", "from admet_ai import ADMETModel; print('ok')"],
+                            cwd=Path("/tmp"), timeout=60,
+                        )
+                        if smoke.returncode == 0 and "ok" in smoke.stdout:
+                            availability, reason = "available", f"conda 环境 {admet_cfg.env} + ADMET-AI 就绪"
+                        else:
+                            availability, reason = "degraded", f"admet_ai 导入失败: {smoke.stderr[:200]}"
+                    except Exception as exc:
+                        availability, reason = "degraded", f"ADMET 健康检查异常: {exc}"
             else:
                 availability, reason = "degraded", "admet_ai 未在 [executors] 中配置"
         elif action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
