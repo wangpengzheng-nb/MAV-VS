@@ -403,7 +403,7 @@ class ToolManager:
         if engine == "gnina":
             return self._run_gnina(step, inputs, work_dir)
         elif engine == "diffdock":
-            return self._run_diffdock(step, inputs, work_dir)
+            return self._run_diffdock_slurm(step, inputs, work_dir)
         else:
             return self._run_smina(step, inputs, work_dir)
 
@@ -479,9 +479,9 @@ class ToolManager:
 
     # ─── DiffDock PPI靶点对接 ────────────────────────────────────────
 
-    def _run_diffdock(self, step: WorkflowStep, inputs: dict[str, Any],
-                      work_dir: Path) -> dict[str, Any]:
-        """DiffDock对接 (PPI靶点推荐)."""
+    def _run_diffdock_slurm(self, step: WorkflowStep, inputs: dict[str, Any],
+                            work_dir: Path) -> dict[str, Any]:
+        """DiffDock对接 via Slurm (从 _run_docking 引擎选择调用)."""
         from autovs.docking import submit_diffdock_docking
 
         receptor = ensure_within(
@@ -495,10 +495,8 @@ class ToolManager:
         if not ligands:
             raise ValueError("DiffDock requires ligands_sdf input")
 
-        # 从配置读取GPU资源
+        # 从配置读取GPU资源（docking.py 的 _gpu_defaults() 已从 tools.toml 读取）
         gpu_config = dict(self.settings.raw.get("slurm", {}).get("gpu", {}))
-        gpu_config["gres"] = "gpu:a100_2g.20gb:1"  # DiffDock needs a GPU
-        gpu_config["memory"] = "40G"
 
         result = submit_diffdock_docking(
             receptor_pdb=Path(str(receptor)),
