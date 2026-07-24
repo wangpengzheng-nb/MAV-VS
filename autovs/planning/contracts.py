@@ -413,6 +413,13 @@ ACTION_CONTRACTS: dict[ActionType, ActionIOContract] = {
         optional_inputs=[],
         outputs=[POCKET_RESOLUTION],
     ),
+    ActionType.GEOMETRIC_POCKET_DETECTION: ActionIOContract(
+        action_type=ActionType.GEOMETRIC_POCKET_DETECTION,
+        scientific_role="fpocket 几何口袋检测（Voronoi/alpha sphere）",
+        required_inputs=[TARGET_STRUCTURE],
+        optional_inputs=[],
+        outputs=[POCKET_RESOLUTION],
+    ),
     ActionType.DIFFDOCK_DOCKING: ActionIOContract(
         action_type=ActionType.DIFFDOCK_DOCKING,
         scientific_role="DiffDock 扩散模型对接（PPI靶点推荐）",
