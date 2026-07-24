@@ -35,7 +35,7 @@ def af3_env_available() -> tuple[bool, str]:
     if not os.environ.get("AF3_SERVER_URL"):
         return False, "AF3_SERVER_URL is not set"
     has_auth = any(os.environ.get(name) for name in (
-        "AF3_TOKEN", "AF3_ACCESS_TOKEN", "AF3_LOGIN_TOKEN", "AF3_PASSWORD",
+        "AF3_TOKEN", "AF3_ACCESS_TOKEN", "AF3_API_KEY", "AF3_LOGIN_TOKEN", "AF3_PASSWORD",
     ))
     if not has_auth and os.environ.get("AF3_AUTH_DISABLED", "").lower() not in {"1", "true", "yes"}:
         return False, "AF3 auth material is not set"
@@ -46,7 +46,9 @@ def load_af3_env() -> AF3Env:
     url = os.environ.get("AF3_SERVER_URL", "").rstrip("/")
     if not url:
         raise RuntimeError("AF3_SERVER_URL is not set")
-    token = os.environ.get("AF3_ACCESS_TOKEN") or os.environ.get("AF3_TOKEN")
+    token = (os.environ.get("AF3_ACCESS_TOKEN")
+             or os.environ.get("AF3_TOKEN")
+             or os.environ.get("AF3_API_KEY"))
     return AF3Env(server_url=url, token=token)
 
 
@@ -179,8 +181,11 @@ def _submit_job(env: AF3Env, input_json: dict[str, Any], *, name: str) -> dict[s
         "run_inference": True,
     }, timeout=60)
     data = json.loads(body.decode("utf-8"))
-    if code != 201:
+    if code not in (200, 201):
         raise RuntimeError(f"AF3 submission failed HTTP {code}: {data.get('detail', data)}")
+    # API 返回 {"id": "...", ...} 也接受 {"job_id": "..."}
+    if "job_id" not in data and "id" in data:
+        data["job_id"] = data["id"]
     return data
 
 
