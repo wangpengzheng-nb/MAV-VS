@@ -232,6 +232,15 @@ class StateStore:
             result.append(item)
         return result
 
+    def list_paused_tasks(self) -> list[dict[str, Any]]:
+        """获取所有 PAUSED 状态的任务，用于 Slurm 自动轮询."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT task_id, status, task_dir FROM tasks WHERE status = ?",
+                ("paused",),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def delete_task(self, task_id: str) -> bool:
         """永久删除任务及其所有关联数据（jobs/artifacts/progress_events）。返回是否成功删除。"""
         with self.connect() as conn:

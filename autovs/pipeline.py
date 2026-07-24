@@ -93,12 +93,18 @@ LLM_ONLY_PHASES = ("target_research", "strategy_generation", "strategy_voting", 
 class PipelineService:
     """The single application service used by CLI, Web, and tests."""
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, *, enable_slurm_poller: bool = True):
         self.settings = settings or load_settings()
         self.store = StateStore(self.settings.database_path)
         self.tools = ToolManager(self.settings, self.store)
         self._cancel_events: dict[str, threading.Event] = {}
         self._pause_events: dict[str, threading.Event] = {}
+        # Slurm 自动轮询器: GPU 作业完成后自动恢复 pipeline
+        self._slurm_poller = None
+        if enable_slurm_poller:
+            from autovs.slurm_poller import SlurmPoller
+            self._slurm_poller = SlurmPoller(self, interval=30)
+            self._slurm_poller.start()
 
     def submit(self, request: TaskRequest, *, use_llm_planning: bool = True) -> str:
         staged, task_dir = self._stage_request(request)

@@ -33,6 +33,35 @@ service = PipelineService()
 app = FastAPI(title="AutoVS-Agent", version="0.1.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+# API key 认证配置
+API_KEY = os.getenv("AUTOVS_API_KEY", "").strip()
+AUTH_ENABLED = bool(API_KEY)
+if not AUTH_ENABLED:
+    import warnings
+    warnings.warn(
+        "AUTOVS_API_KEY not set in .env — API endpoints are OPEN (no authentication). "
+        "Set AUTOVS_API_KEY in .env to enable API key authentication.",
+        RuntimeWarning,
+    )
+
+
+@app.middleware("http")
+async def api_key_auth(request: Request, call_next):
+    """API key 认证中间件: 检查 Bearer token, /api/health 豁免."""
+    if AUTH_ENABLED and request.url.path.startswith("/api/") \
+            and not request.url.path.startswith("/api/health") \
+            and not request.url.path.startswith("/api/progress"):
+        # progress 使用 SSE, 从 query param 取 token
+        token = None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        elif "token" in request.query_params:
+            token = request.query_params["token"]
+        if token != API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return await call_next(request)
+
 
 @app.middleware("http")
 async def cache_policy(request: Request, call_next):
