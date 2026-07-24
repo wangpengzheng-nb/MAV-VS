@@ -167,16 +167,13 @@ def compile_strategy(strategy: dict[str, Any], *, input_manifest: InputManifest 
             action = ALIASES[raw_action] if raw_action in ALIASES else ActionType(raw_action)
         except ValueError as exc:
             raise ValueError(f"unknown action_type: {raw_action}") from exc
-        if action == ActionType.TARGET_STRUCTURE_PREDICTION:
-            raise ValueError(
-                "capability gap: target_structure_prediction requires an AlphaFold/Boltz adapter, "
-                "which is not configured yet"
-            )
         step_id = _slug(str(raw.get("step_id") or raw.get("id") or f"strategy-{index}"), f"strategy-{index}")
         params = raw.get("parameters") if isinstance(raw.get("parameters"), dict) else raw.get("params", {})
         executor = "python"
         environment = None
         gpu = False
+        if action == ActionType.TARGET_STRUCTURE_PREDICTION:
+            executor, environment, gpu = "python", None, False  # AF3 HTTP API, waits externally
         if action == ActionType.MOLECULAR_DOCKING:
             executor, environment = "slurm", "smina_stage2"
         elif action == ActionType.INTERACTION_ANALYSIS:
