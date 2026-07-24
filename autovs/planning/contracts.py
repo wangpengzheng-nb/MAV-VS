@@ -23,6 +23,7 @@ from autovs.dag import (
     MOLECULE_PREP_REPORTS, MANIFEST_CSV, RECEPTOR_PDB, RECEPTOR_PDBQT,
     DOCKED_POSES, SCORES_CSV, SELECTED_POSES, COMPLEX_INDEX,
     PLIP_SCORES, TOP_HITS, HIT_COUNT,
+    ADMET_PREDICTIONS, POSE_VALIDATION_REPORT,
 )
 
 
@@ -160,6 +161,16 @@ ARTIFACT_REGISTRY: dict[str, ArtifactSchema] = {
         description="命中分子数量",
         allowed_formats=["int"],
         sensitive_path=False,
+    ),
+    ADMET_PREDICTIONS: ArtifactSchema(
+        artifact_key=ADMET_PREDICTIONS,
+        description="ADMET-AI 预测结果 CSV",
+        allowed_formats=["CSV", "csv"],
+    ),
+    POSE_VALIDATION_REPORT: ArtifactSchema(
+        artifact_key=POSE_VALIDATION_REPORT,
+        description="PoseBusters 姿势验证报告 CSV",
+        allowed_formats=["CSV", "csv"],
     ),
 }
 
@@ -361,7 +372,7 @@ ACTION_CONTRACTS: dict[ActionType, ActionIOContract] = {
         scientific_role="ADMET 风险预测",
         required_inputs=[SCORES_CSV],
         optional_inputs=[],
-        outputs=[SCORES_CSV],
+        outputs=[ADMET_PREDICTIONS],
     ),
     ActionType.SHORT_MD: ActionIOContract(
         action_type=ActionType.SHORT_MD,
@@ -385,8 +396,31 @@ ACTION_CONTRACTS: dict[ActionType, ActionIOContract] = {
         action_type=ActionType.DIVERSITY_SELECTION,
         scientific_role="Murcko 骨架多样性筛选",
         required_inputs=[SCORES_CSV],
+        optional_inputs=["manifest_csv"],
+        outputs=[TOP_HITS],
+    ),
+    ActionType.POSE_VALIDATION: ActionIOContract(
+        action_type=ActionType.POSE_VALIDATION,
+        scientific_role="PoseBusters 姿势合理性验证",
+        required_inputs=[SELECTED_POSES],
+        optional_inputs=["receptor_pdb"],
+        outputs=[POSE_VALIDATION_REPORT],
+    ),
+    ActionType.POCKET_PREDICTION: ActionIOContract(
+        action_type=ActionType.POCKET_PREDICTION,
+        scientific_role="P2Rank 结合口袋预测（apo结构）",
+        required_inputs=[TARGET_STRUCTURE],
         optional_inputs=[],
-        outputs=[SCORES_CSV],
+        outputs=[POCKET_RESOLUTION],
+    ),
+    ActionType.DIFFDOCK_DOCKING: ActionIOContract(
+        action_type=ActionType.DIFFDOCK_DOCKING,
+        scientific_role="DiffDock 扩散模型对接（PPI靶点推荐）",
+        required_inputs=[RECEPTOR_PDB, PREPARED_LIBRARY],
+        optional_inputs=[],
+        outputs=[DOCKED_POSES, SCORES_CSV],
+        gpu_required=True,
+        executor_type="slurm",
     ),
 }
 

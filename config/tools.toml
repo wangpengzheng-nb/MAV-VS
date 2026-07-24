@@ -83,6 +83,15 @@ health_check = "gmx --version"
 description = "GROMACS 分子动力学模拟（Apptainer 容器）"
 gpu_required = true
 
+[executors.diffdock]
+name = "diffdock"
+executor = "slurm"
+path = "/users_home/wangpengzheng/miniforge3/envs/diffdock/bin/python"
+env = "diffdock"
+health_check = "diffdock"
+description = "DiffDock 扩散模型对接（GPU，PPI靶点推荐）"
+gpu_required = true
+
 [executors.alphafold3]
 name = "alphafold3"
 executor = "python_module"
@@ -153,6 +162,22 @@ executor = "python_module"
 module = "meeko"
 health_check = "meeko"
 description = "Meeko AutoDock/Vina PDBQT 参数化"
+
+[executors.posebusters]
+name = "posebusters"
+executor = "python_module"
+module = "posebusters"
+health_check = "posebusters"
+description = "PoseBusters 对接姿势合理性验证（化学/分子内/分子间检查）"
+
+[executors.p2rank]
+name = "p2rank"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/software/p2rank_2.5.1/prank"
+health_check = "help"
+description = "P2Rank 机器学习结合口袋预测（apo口袋发现、候选排序、残基映射）"
+
+# diffdock executor 已在前面 [executors.diffdock] 定义
 
 [environments]
 core = "autovs-core"

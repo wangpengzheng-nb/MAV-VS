@@ -442,11 +442,18 @@ class TestGraphBuilder:
             ],
         )
 
+        # 构造一个 ADMET_FILTERING 标记为 unavailable 的能力列表
+        caps = _all_available_capabilities()
+        for cap in caps:
+            if cap.action_type == ActionType.ADMET_FILTERING:
+                cap.availability = "unavailable"
+                cap.reason = "ADMET not installed"
+
         with pytest.raises(PlannerCapabilityGapError, match="admet_filtering"):
             WorkflowGraphBuilder(
                 draft=draft,
                 input_manifest=manifest,
-                capabilities=_all_available_capabilities(),
+                capabilities=caps,
                 constraints=PlannerConstraints(),
             ).build()
 

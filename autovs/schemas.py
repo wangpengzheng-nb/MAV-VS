@@ -40,6 +40,9 @@ class ActionType(str, Enum):
     IONIZATION_ENUMERATION = "ionization_enumeration"            # Dimorphite-DL
     PDBQT_PARAMETERIZATION = "pdbqt_parameterization"           # Meeko
     FORMAT_CONVERSION = "format_conversion"                      # Open Babel
+    POSE_VALIDATION = "pose_validation"                          # PoseBusters
+    POCKET_PREDICTION = "pocket_prediction"                      # P2Rank
+    DIFFDOCK_DOCKING = "diffdock_docking"                        # DiffDock
 
 
 class ArtifactRef(StrictModel):

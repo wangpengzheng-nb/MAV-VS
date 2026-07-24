@@ -19,7 +19,7 @@ EVOLVER_SYSTEM_PROMPT = """\
 4. 如果某个concern是根本性的(如靶点错配), 标注为不可修复
 5. 第一版只允许以下action_type: library_preparation, protein_preparation,
    binding_site_detection, physicochemical_filtering, diversity_selection,
-   molecular_docking, interaction_analysis, admet_filtering,
+   molecular_docking, pose_extraction, pose_validation, pocket_prediction, interaction_analysis, admet_filtering,
    molecular_dynamics, final_ranking, report_generation,
    similarity_screening, pharmacophore_screening, shape_matching,
    fragment_screening, consensus_scoring, target_structure_prediction

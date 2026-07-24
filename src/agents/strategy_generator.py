@@ -150,11 +150,10 @@ for _m in [ActionInput, ActionOutput, PipelineAction, TargetProfile, StrategyCon
 EXECUTABLE_STRATEGY_ACTIONS = {
     "library_preparation", "protein_preparation", "binding_site_detection",
     "physicochemical_filtering", "molecular_docking", "interaction_analysis",
-    "final_ranking", "report_generation",
+    "final_ranking", "report_generation", "pose_validation", "admet_filtering",
+    "pocket_prediction", "diffdock_docking",
 }
 FUTURE_ACTION_CAPABILITIES = {
-    "target_structure_prediction": "AlphaFold/Boltz target structure prediction adapter",
-    "admet_filtering": "ADMET-AI production adapter",
     "molecular_dynamics": "GROMACS/MD production workflow",
     "short_md": "GROMACS short MD quality gate",
     "similarity_screening": "2D/3D ligand similarity screening engine",
@@ -652,6 +651,8 @@ class StrategyGeneratorAgent:
             "library_preparation": "分子库标准化与构象准备",
             "protein_preparation": "蛋白结构准备",
             "binding_site_detection": "证据驱动口袋定义",
+            "pocket_prediction": "ML口袋预测（P2Rank apo结构）",
+            "diffdock_docking": "扩散模型分子对接（DiffDock）",
             "physicochemical_filtering": "靶点适配理化过滤",
             "molecular_docking": "口袋导向分子对接",
             "interaction_analysis": "关键相互作用指纹分析",

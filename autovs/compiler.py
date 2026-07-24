@@ -31,6 +31,10 @@ ALIASES = {
     "ionization_enumeration": ActionType.IONIZATION_ENUMERATION,
     "pdbqt_parameterization": ActionType.PDBQT_PARAMETERIZATION,
     "format_conversion": ActionType.FORMAT_CONVERSION,
+    "diversity_selection": ActionType.DIVERSITY_SELECTION,
+    "pose_validation": ActionType.POSE_VALIDATION,
+    "diffdock_docking": ActionType.MOLECULAR_DOCKING,
+    "gnina_docking": ActionType.MOLECULAR_DOCKING,
 }
 
 UNSUPPORTED_V1 = {

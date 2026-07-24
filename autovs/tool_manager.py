@@ -314,7 +314,9 @@ class ToolManager:
             rows = rank_csv(score_csv, output, top_n=int(self.settings.limit("final_hits", 20)))
             return {"top_hits": output, "hit_count": len(rows)}
         if action == ActionType.MOLECULAR_DOCKING:
-            return self._run_smina(step, inputs, work_dir)
+            return self._run_docking(step, inputs, work_dir)
+        if action == ActionType.DIVERSITY_SELECTION:
+            return self._run_diversity(inputs, work_dir)
         if action == ActionType.POSE_EXTRACTION:
             return self._extract_poses(inputs, work_dir)
         if action == ActionType.INTERACTION_ANALYSIS:
@@ -337,6 +339,12 @@ class ToolManager:
             return self._convert_format(inputs, work_dir)
         if action == ActionType.ADMET_FILTERING:
             return self._run_admet(inputs, work_dir)
+        if action == ActionType.POSE_VALIDATION:
+            return self._run_pose_validation(inputs, work_dir)
+        if action == ActionType.POCKET_PREDICTION:
+            return self._run_pocket_prediction(inputs, work_dir)
+        if action == ActionType.DIFFDOCK_DOCKING:
+            return self._run_diffdock(inputs, work_dir)
         if action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
             from autovs.gromacs import submit_gromacs_md
             receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
@@ -351,7 +359,209 @@ class ToolManager:
             )
         raise RuntimeError(f"{action.value} has no active production adapter; capability is not executable yet")
 
-    def _run_smina(self, step: WorkflowStep, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+    # ─── 统一对接引擎路由 ─────────────────────────────────────────────
+
+    def _run_docking(self, step: WorkflowStep, inputs: dict[str, Any],
+                     work_dir: Path) -> dict[str, Any]:
+        """三引擎统一对接入口.
+
+        根据策略参数或自动选择引擎:
+        - smina: CPU快速对接
+        - gnina: GPU CNN打分对接
+        - diffdock: PPI靶点扩散模型对接
+        """
+        from autovs.docking import select_docking_engine
+
+        # 读取target_type用于引擎选择
+        research: dict[str, Any] = {}
+        research_path = self.settings.task_root.parent / "research"
+        research_json = work_dir.parent.parent / "research.json"
+        if research_json.is_file():
+            try:
+                research = json.loads(research_json.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # GPU可用性检查
+        gnina_cfg = self._executor("gnina")
+        gpu_available = gnina_cfg is not None and gnina_cfg.gpu_required
+        cpu_only = step.parameters.get("cpu_only", False)
+
+        engine = select_docking_engine(
+            strategy_params=step.parameters,
+            research=research,
+            gpu_available=gpu_available,
+            cpu_only=cpu_only,
+        )
+
+        if engine == "gnina":
+            return self._run_gnina(step, inputs, work_dir)
+        elif engine == "diffdock":
+            return self._run_diffdock(step, inputs, work_dir)
+        else:
+            return self._run_smina(step, inputs, work_dir)
+
+    # ─── GNINA GPU 对接 ──────────────────────────────────────────────
+
+    def _run_gnina(self, step: WorkflowStep, inputs: dict[str, Any],
+                   work_dir: Path) -> dict[str, Any]:
+        """GNINA GPU对接 (CNN scoring)."""
+        from autovs.docking import submit_gnina_docking, parse_docking_scores
+
+        receptor = ensure_within(
+            inputs.get("receptor_pdbqt", inputs.get("receptor_pdb")),
+            [self.settings.task_root], must_exist=True,
+        )
+        ligands = ensure_within(
+            inputs.get("ligands_sdf", inputs.get("enumerated_3d_sdf")),
+            [self.settings.task_root], must_exist=True,
+        )
+        center = inputs.get("center")
+        size = inputs.get("size", (24, 24, 24))
+        if not center or len(center) != 3:
+            raise ValueError("docking requires a three-value pocket center")
+
+        gnina_cfg = self._require_executor("gnina")
+        gnina_bin = str(gnina_cfg.path) if gnina_cfg.path else "gnina"
+
+        # 从配置读取GPU资源
+        gpu_config = dict(self.settings.raw.get("slurm", {}).get("gpu", {}))
+
+        result = submit_gnina_docking(
+            receptor_pdbqt=Path(str(receptor)),
+            ligands_sdf=Path(str(ligands)),
+            center=(float(center[0]), float(center[1]), float(center[2])),
+            size=(float(size[0]), float(size[1]), float(size[2])),
+            output_dir=work_dir,
+            exhaustiveness=step.parameters.get("exhaustiveness", 8),
+            num_modes=step.parameters.get("num_modes", 5),
+            cnn_scoring=step.parameters.get("cnn_scoring", "rescore"),
+            cnn_rotation=step.parameters.get("cnn_rotation", 1),
+            seed=step.parameters.get("seed", 61453),
+            gnina_bin=gnina_bin,
+            gpu_config=gpu_config,
+            submit_slurm=step.parameters.get("submit_slurm", True),
+        )
+
+        slurm_id = result.get("slurm_job_id", "")
+        if slurm_id:
+            # Slurm提交: 返回pending状态
+            from autovs.af3 import ToolPending
+            state_path = work_dir / "gnina_state.json"
+            state_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            raise ToolPending(
+                f"GNINA Slurm job {slurm_id} submitted",
+                state_path=state_path,
+                slurm_job_id=slurm_id,
+            )
+
+        # 本地模式: 直接解析结果
+        output_sdf = Path(result["output_sdf"])
+        if not output_sdf.is_file():
+            raise RuntimeError("GNINA output SDF not found")
+
+        manifest_path = inputs.get("manifest_csv")
+        manifest = Path(str(manifest_path)) if manifest_path else None
+        scores_csv = parse_docking_scores(output_sdf, manifest, engine="gnina")
+
+        return {
+            "docked_poses": output_sdf,
+            "scores_csv": scores_csv,
+            "log": result.get("log_file", str(work_dir / "gnina.log")),
+            "engine": "gnina",
+        }
+
+    # ─── DiffDock PPI靶点对接 ────────────────────────────────────────
+
+    def _run_diffdock(self, step: WorkflowStep, inputs: dict[str, Any],
+                      work_dir: Path) -> dict[str, Any]:
+        """DiffDock对接 (PPI靶点推荐)."""
+        from autovs.docking import submit_diffdock_docking
+
+        receptor = ensure_within(
+            inputs.get("receptor_pdb", inputs.get("protein_path")),
+            [self.settings.task_root], must_exist=True,
+        )
+
+        # DiffDock处理单个配体，对于批量需要逐个提交
+        # 获取配体SMILES (从manifest或ligands_sdf)
+        ligands = inputs.get("ligands_sdf", "")
+        if not ligands:
+            raise ValueError("DiffDock requires ligands_sdf input")
+
+        # 从配置读取GPU资源
+        gpu_config = dict(self.settings.raw.get("slurm", {}).get("gpu", {}))
+        gpu_config["gres"] = "gpu:a100_2g.20gb:1"  # DiffDock needs a GPU
+        gpu_config["memory"] = "40G"
+
+        result = submit_diffdock_docking(
+            receptor_pdb=Path(str(receptor)),
+            ligands_smi=str(ligands),
+            output_dir=work_dir,
+            samples_per_complex=step.parameters.get("samples_per_complex", 10),
+            inference_steps=step.parameters.get("inference_steps", 20),
+            conda_env="diffdock",
+            diffdock_home="/users_home/wangpengzheng/software/DiffDock",
+            gpu_config=gpu_config,
+            submit_slurm=step.parameters.get("submit_slurm", True),
+        )
+
+        slurm_id = result.get("slurm_job_id", "")
+        if slurm_id:
+            from autovs.af3 import ToolPending
+            state_path = work_dir / "diffdock_state.json"
+            state_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            raise ToolPending(
+                f"DiffDock Slurm job {slurm_id} submitted",
+                state_path=state_path,
+                slurm_job_id=slurm_id,
+            )
+
+        # 本地模式: 读取result.json
+        result_json_path = Path(result.get("result_json", ""))
+        if result_json_path.is_file():
+            diffdock_result = json.loads(result_json_path.read_text(encoding="utf-8"))
+            poses_count = len(diffdock_result.get("poses", []))
+            return {
+                "result_json": result_json_path,
+                "poses_count": poses_count,
+                "top_confidence": diffdock_result.get("top_confidence"),
+                "engine": "diffdock",
+            }
+
+        raise RuntimeError("DiffDock result.json not found")
+
+    # ─── 多样性选择 ──────────────────────────────────────────────────
+
+    def _run_diversity(self, inputs: dict[str, Any],
+                       work_dir: Path) -> dict[str, Any]:
+        """基于Murcko骨架的Top-N多样性选择."""
+        from autovs.docking import select_diverse_top_n
+
+        scores_csv = ensure_within(
+            inputs["scores_csv"], [self.settings.task_root], must_exist=True,
+        )
+        output_csv = work_dir / "diverse_top20.csv"
+        manifest = inputs.get("manifest_csv")
+
+        top_n = int(self.settings.limit("final_hits", 20))
+        max_per = int(inputs.get("max_per_scaffold", 2))
+
+        rows = select_diverse_top_n(
+            scores_csv=Path(str(scores_csv)),
+            output_csv=output_csv,
+            top_n=top_n,
+            max_per_scaffold=max_per,
+            manifest_csv=Path(str(manifest)) if manifest else None,
+        )
+
+        return {
+            "top_hits": output_csv,
+            "hit_count": len(rows),
+            "max_per_scaffold": max_per,
+        }
+
+    # ─── smina CPU 对接 (legacy) ──────────────────────────────────────
         from rdkit import Chem
         smina_cfg = self._require_executor("smina")
         smina = Path(smina_cfg.path) if smina_cfg.path else None
@@ -841,6 +1051,248 @@ class ToolManager:
             "admet_predictions": output_csv,
             "molecule_count": molecule_count,
             "admet_log": work_dir / "admet.log",
+        }
+
+
+    def _run_pose_validation(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """PoseBusters 姿势合理性验证（化学/分子内/分子间检查）。"""
+        from posebusters import PoseBusters
+
+        selected_poses = ensure_within(inputs["selected_poses"], [self.settings.task_root], must_exist=True)
+        receptor = ensure_within(inputs.get("receptor_pdb") or inputs.get("protein_path"),
+                                 [self.settings.task_root], must_exist=True)
+        config = str(inputs.get("pb_config", "dock"))
+        top_n = inputs.get("top_n")  # None = all
+        full_report = bool(inputs.get("full_report", True))
+
+        # 幂等检查
+        output_csv = work_dir / "posebusters_report.csv"
+        if output_csv.is_file() and output_csv.stat().st_size > 0:
+            import csv as _csv
+            valid_count = sum(1 for _ in _csv.DictReader(output_csv.open(encoding="utf-8-sig", newline="")))
+            return {"pose_validation_report": output_csv, "total_checked": valid_count}
+
+        # 运行 PoseBusters
+        busters = PoseBusters(config=config, top_n=top_n)
+        result_df = busters.bust(
+            mol_pred=str(selected_poses),
+            mol_cond=str(receptor),
+            full_report=full_report,
+        )
+
+        # 写入结果 CSV
+        result_df.to_csv(output_csv, index=True, index_label="mol_id")
+        log_path = work_dir / "posebusters.log"
+        log_path.write_text(
+            f"PoseBusters config={config}, molecules={len(result_df)}\n"
+            f"columns={list(result_df.columns)}\n",
+            encoding="utf-8",
+        )
+
+        # 统计
+        pb_valid_col = "valid" if "valid" in result_df.columns else None
+        total = len(result_df)
+        valid_count = int(result_df[pb_valid_col].sum()) if pb_valid_col else total
+
+        return {
+            "pose_validation_report": output_csv,
+            "pose_validation_log": log_path,
+            "total_checked": total,
+            "pb_valid_count": valid_count,
+            "pb_invalid_count": total - valid_count,
+        }
+
+
+    def _run_pocket_prediction(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """P2Rank ML-based apo pocket prediction.
+
+        Outputs a PocketResolution-compatible JSON with top-N predicted pockets.
+        """
+        import csv as _csv
+
+        protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+        top_n = int(inputs.get("top_n", 5))
+        config_preset = str(inputs.get("p2rank_config", "default"))
+
+        # 幂等检查
+        output_json = work_dir / "p2rank_pockets.json"
+        if output_json.is_file() and output_json.stat().st_size > 0:
+            return {"pocket_resolution": output_json}
+
+        # 查找 P2Rank 可执行脚本
+        p2rank_cfg = self._require_executor("p2rank")
+        prank_path = Path(p2rank_cfg.path) if p2rank_cfg.path else None
+        if not prank_path or not prank_path.exists():
+            raise RuntimeError("P2Rank prank 脚本不存在")
+
+        # 设置 Java 版本（P2Rank 需要 Java 17+）
+        import os as _os
+        env = dict(_os.environ)
+        java_home = str(self.settings.executable("conda") or "")
+        if java_home:
+            java_home = str(Path(java_home).parent.parent)
+            env["JAVA_HOME"] = java_home
+
+        # 运行 P2Rank
+        argv = [str(prank_path), "predict", "-f", str(protein), "-o", str(work_dir)]
+        if config_preset != "default":
+            argv.extend(["-c", config_preset])
+        log = work_dir / "p2rank.log"
+        result = run_argv(
+            argv, cwd=work_dir, timeout=int(inputs.get("timeout_seconds", 3600)),
+            log_path=log, env=env,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"P2Rank failed (exit={result.returncode}): {result.stderr[-500:]}")
+
+        # 查找预测输出 CSV
+        predictions_csv = next(work_dir.glob("*_predictions.csv"), None)
+        if not predictions_csv:
+            raise RuntimeError("P2Rank did not produce a _predictions.csv file")
+
+        # 解析口袋候选
+        pockets: list[dict] = []
+        with predictions_csv.open(encoding="utf-8-sig", newline="") as handle:
+            reader = _csv.DictReader(handle)
+            for row in reader:
+                try:
+                    name = (row.get("name") or "").strip()
+                    rank = int(float((row.get("rank") or "0").strip()))
+                    score = float((row.get("score") or "0").strip())
+                    prob = float((row.get("probability") or "0").strip())
+                    cx = float((row.get("center_x") or "0").strip())
+                    cy = float((row.get("center_y") or "0").strip())
+                    cz = float((row.get("center_z") or "0").strip())
+                    residue_str = (row.get("residue_ids") or "").strip()
+                    residues = [r.strip() for r in residue_str.split() if r.strip()] if residue_str else []
+                except (ValueError, KeyError):
+                    continue
+                pockets.append({
+                    "name": name, "rank": rank, "score": round(score, 2),
+                    "probability": round(prob, 3),
+                    "center": [round(cx, 4), round(cy, 4), round(cz, 4)],
+                    "residue_ids": residues,
+                })
+                if len(pockets) >= top_n:
+                    break
+
+        if not pockets:
+            raise RuntimeError("P2Rank produced no valid pocket predictions")
+
+        # 构建 PocketResolution 兼容输出
+        from autovs.schemas import (
+            PocketCandidate, PocketConfidence, PocketEvidence,
+            PocketQualityGate, PocketResolution, PocketSource,
+        )
+        import hashlib as _hashlib
+        top = pockets[0]
+        selected = PocketCandidate(
+            pocket_id=f"pocket_{_hashlib.sha256(str(top).encode()).hexdigest()[:12]}",
+            rank=1,
+            center=tuple(top["center"]),
+            size=(24.0, 24.0, 24.0),
+            source=PocketSource.VERIFIED_RESEARCH_STRUCTURE,
+            confidence=PocketConfidence.MEDIUM,
+            residues=top["residue_ids"],
+            evidence=[
+                PocketEvidence(kind="p2rank_score",
+                               description=f"P2Rank score: {top['score']}, prob: {top['probability']}",
+                               value=top["score"]),
+                PocketEvidence(kind="p2rank_config",
+                               description=f"P2Rank config: {config_preset}",
+                               value=config_preset),
+            ],
+            quality_gates=[
+                PocketQualityGate(name="p2rank_prediction", status="passed",
+                                  detail=f"Top-1 score={top['score']} among {len(pockets)} candidates"),
+            ],
+            tool_versions={"p2rank": "2.5.1"},
+        )
+        alternates = []
+        for p in pockets[1:top_n]:
+            alternates.append(PocketCandidate(
+                pocket_id=f"pocket_{_hashlib.sha256(str(p).encode()).hexdigest()[:12]}",
+                rank=p["rank"],
+                center=tuple(p["center"]),
+                size=(24.0, 24.0, 24.0),
+                source=PocketSource.VERIFIED_RESEARCH_STRUCTURE,
+                confidence=PocketConfidence.MEDIUM,
+                residues=p["residue_ids"],
+                evidence=[
+                    PocketEvidence(kind="p2rank_score",
+                                   description=f"P2Rank score: {p['score']}, prob: {p['probability']}",
+                                   value=p["score"]),
+                ],
+            ))
+        resolution = PocketResolution(
+            protein_path=str(protein),
+            selected_pocket=selected,
+            alternate_pockets=alternates,
+            research_pdb_id=Path(protein).stem,
+            warnings=[f"P2Rank ML prediction (config={config_preset}); verify with experimental evidence if available"],
+        )
+        output_json.write_text(resolution.model_dump_json(indent=2), encoding="utf-8")
+        return {"pocket_resolution": output_json, "pocket": output_json,
+                "predicted_pockets_csv": predictions_csv,
+                "total_pockets": len(pockets), "top_score": top["score"]}
+
+
+    def _run_diffdock(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """DiffDock: 扩散模型分子对接（conda env 调用 wrapper）。"""
+        receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
+        ligand_desc = inputs.get("ligand_smiles") or inputs.get("ligand_sdf")
+        if not ligand_desc:
+            raise ValueError("DIFFDOCK_DOCKING 需要 ligand_smiles 或 ligand_sdf 输入")
+        samples = int(inputs.get("samples", 10))
+        steps = int(inputs.get("inference_steps", 20))
+
+        # 幂等
+        output_json = work_dir / "diffdock_result.json"
+        if output_json.is_file():
+            import json as _json
+            data = _json.loads(output_json.read_text(encoding="utf-8"))
+            if data.get("status") == "ok":
+                return {"diffdock_result": output_json, "docked_poses": work_dir / "rank1.sdf"}
+
+        # 找 conda env Python 和 wrapper 脚本
+        conda_bin = self.settings.executable("conda")
+        env_python = Path(str(conda_bin)).parent.parent / "envs" / "diffdock" / "bin" / "python"
+        if not env_python.exists():
+            raise RuntimeError("diffdock conda 环境未安装")
+
+        wrapper = Path(str(self.settings.config_path)).parent.parent / "scripts" / "diffdock_wrapper.py"
+        if not wrapper.is_file():
+            raise RuntimeError(f"DiffDock wrapper 不存在: {wrapper}")
+
+        # 如果 ligand_desc 是 SDF 路径，确保它在 task_root 内
+        if Path(ligand_desc).exists():
+            ligand_desc = str(ensure_within(ligand_desc, [self.settings.task_root], must_exist=True))
+
+        argv = [
+            str(env_python), str(wrapper),
+            str(receptor), str(ligand_desc), str(work_dir),
+            "--samples", str(samples),
+            "--steps", str(steps),
+        ]
+        result = run_argv(
+            argv, cwd=Path("/users_home/wangpengzheng/software/DiffDock"),  # SO(2) 缓存在此目录
+            timeout=int(inputs.get("timeout_seconds", 36000)),
+            log_path=work_dir / "diffdock.log",
+        )
+        if result.returncode != 0 or not output_json.is_file():
+            raise RuntimeError(f"DiffDock failed (exit={result.returncode}): {result.stderr[-500:]}")
+
+        # 解析结果找最佳姿态
+        data = json.loads(output_json.read_text(encoding="utf-8"))
+        poses = data.get("poses", [])
+        top_confidence = data.get("top_confidence")
+        rank1_sdf = work_dir / "rank1.sdf"
+
+        return {
+            "diffdock_result": output_json,
+            "docked_poses": rank1_sdf if rank1_sdf.is_file() else None,
+            "top_confidence": top_confidence,
+            "pose_count": len(poses),
         }
 
 

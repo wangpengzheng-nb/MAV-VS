@@ -33,7 +33,18 @@ CAPABILITY_DEFINITIONS = {
     ActionType.LIGAND_3D_ENUMERATION: ("Gypsum-DL 3D enumeration", "Protonation/tautomer/stereo/conformer enumeration with limits (Apache-2.0)", "python", ["SMI"], ["SDF", "JSON"], False),
     ActionType.IONIZATION_ENUMERATION: ("Dimorphite-DL ionization", "pH-dependent ionization state enumeration", "python", ["SMI"], ["JSON"], False),
     ActionType.PDBQT_PARAMETERIZATION: ("Meeko PDBQT preparation", "AutoDock/Vina PDBQT parameterization with Gasteiger charges", "python", ["SDF"], ["PDBQT", "JSON"], False),
-    ActionType.FORMAT_CONVERSION: ("Open Babel converter", "General molecular format conversion (SMI/SDF/PDB/MOL2)", "conda", ["SMI", "SDF", "PDB"], ["SDF", "PDB", "PDBQT"], False),}
+    ActionType.FORMAT_CONVERSION: ("Open Babel converter", "General molecular format conversion (SMI/SDF/PDB/MOL2)", "conda", ["SMI", "SDF", "PDB"], ["SDF", "PDB", "PDBQT"], False),
+    ActionType.POSE_VALIDATION: ("PoseBusters", "Validate docking pose plausibility (chemical validity, intramolecular geometry, intermolecular clashes)", "python", ["SDF", "PDB"], ["CSV"], False),
+    ActionType.POCKET_PREDICTION: ("P2Rank", "ML-based apo binding pocket prediction (scored/clustered SAS points)", "subprocess", ["PDB", "mmCIF"], ["CSV", "JSON"], False),
+    ActionType.DIFFDOCK_DOCKING: ("DiffDock", "Diffusion model molecular docking (generative pose prediction + confidence scoring)", "conda", ["PDB", "SDF", "SMILES"], ["SDF", "JSON"], True),}
+
+
+def _torch_gpu_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
 
 
 def _exists(path: Path | None) -> bool:
@@ -206,6 +217,31 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 ok, smoke_reason = _molecule_tool_smoke(action, settings)
                 if not ok:
                     availability, reason = "unavailable", smoke_reason
+        elif action == ActionType.POSE_VALIDATION:
+            try:
+                import posebusters  # noqa: F401
+            except ImportError:
+                availability, reason = "unavailable", "posebusters not installed (pip install posebusters)"
+        elif action == ActionType.POCKET_PREDICTION:
+            p2rank_cfg = settings.executor_config("p2rank")
+            if not p2rank_cfg or not p2rank_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "P2Rank prank script not found"
+            else:
+                java = settings.executable("conda")
+                java_bin = java.parent.parent / "bin" / "java" if java else None
+                if not _exists(java_bin):
+                    availability, reason = "degraded", "Java not found (P2Rank requires Java 17+)"
+                else:
+                    availability, reason = "available", "P2Rank 2.5.1 ready"
+        elif action == ActionType.DIFFDOCK_DOCKING:
+            conda = settings.executable("conda")
+            env_python = conda.parent.parent / "envs" / "diffdock" / "bin" / "python" if conda else None
+            if not _exists(env_python):
+                availability, reason = "degraded", "diffdock conda 环境未安装"
+            elif not _torch_gpu_available():
+                availability, reason = "degraded", "CUDA/GPU 不可用（DiffDock 需要 GPU）"
+            else:
+                availability, reason = "available", "DiffDock conda env ready"
         result.append(ToolCapability(
             action_type=action, name=name, description=desc, availability=availability,
             executor=executor, input_formats=inputs, output_formats=outputs,

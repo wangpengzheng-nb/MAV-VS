@@ -79,6 +79,9 @@ ACTION_PHASE = {
     ActionType.IONIZATION_ENUMERATION: "molecule_standardization",
     ActionType.PDBQT_PARAMETERIZATION: "molecule_standardization",
     ActionType.FORMAT_CONVERSION: "molecule_standardization",
+    ActionType.POSE_VALIDATION: "pose_extraction",
+    ActionType.POCKET_PREDICTION: "pocket_definition",
+    ActionType.DIFFDOCK_DOCKING: "molecular_docking",
 }
 
 LLM_ONLY_PHASES = ("target_research", "strategy_generation", "strategy_voting", "strategy_evolution")

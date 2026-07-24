@@ -54,6 +54,7 @@ PLIP_SCORES = "plip_scores"                   # Path: PLIP interaction scores CS
 TOP_HITS = "top_hits"                         # Path: final ranked top-N CSV
 HIT_COUNT = "hit_count"                       # int
 ADMET_PREDICTIONS = "admet_predictions"        # Path: ADMET-AI predictions CSV
+POSE_VALIDATION_REPORT = "pose_validation_report"  # Path: PoseBusters validation CSV
 
 
 # ── Input resolver / output binder registry ──────────────────────────
@@ -220,6 +221,20 @@ def _resolve_final_ranking(state: dict[str, Any], **kwargs: Any) -> dict[str, An
 
 
 def _bind_final_ranking(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    state[TOP_HITS] = outputs.get("top_hits")
+    state[HIT_COUNT] = outputs.get("hit_count", 0)
+
+
+def _resolve_diversity_selection(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "scores_csv": state[SCORES_CSV],
+        "manifest_csv": state.get(MANIFEST_CSV),
+        "max_per_scaffold": kwargs.get("max_per_scaffold", 2),
+        "top_n": kwargs.get("top_n", 20),
+    }
+
+
+def _bind_diversity_selection(outputs: dict[str, Any], state: dict[str, Any]) -> None:
     state[TOP_HITS] = outputs.get("top_hits")
     state[HIT_COUNT] = outputs.get("hit_count", 0)
 
@@ -419,6 +434,65 @@ def _bind_admet_filtering(outputs: dict[str, Any], state: dict[str, Any]) -> Non
             state[SCORES_CSV] = str(merged)
 
 
+def _resolve_diffdock(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "receptor_pdb": state[RECEPTOR_PDB],
+        "ligand_smiles": kwargs.get("ligand_smiles"),
+        "ligand_sdf": kwargs.get("ligand_sdf"),
+        "samples": kwargs.get("samples", 10),
+        "inference_steps": kwargs.get("inference_steps", 20),
+        "timeout_seconds": kwargs.get("timeout_seconds", 36000),
+    }
+
+
+def _bind_diffdock(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    docked = outputs.get("docked_poses")
+    if docked and Path(docked).is_file():
+        state[DOCKED_POSES] = docked
+    result_json = outputs.get("diffdock_result")
+    if result_json:
+        state["_diffdock_result"] = result_json
+
+
+def _resolve_pocket_prediction(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "protein_path": state[TARGET_STRUCTURE],
+        "top_n": kwargs.get("top_n", 5),
+        "p2rank_config": kwargs.get("p2rank_config", "default"),
+        "timeout_seconds": kwargs.get("timeout_seconds", 3600),
+    }
+
+
+def _bind_pocket_prediction(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    pocket_path = outputs.get("pocket") or outputs.get("pocket_resolution")
+    if pocket_path:
+        from autovs.schemas import PocketResolution
+        resolution = PocketResolution.model_validate_json(Path(pocket_path).read_text(encoding="utf-8"))
+        state[POCKET_RESOLUTION] = resolution.model_dump(mode="json")
+        state[POCKET_CENTER] = resolution.selected_pocket.center
+        state[POCKET_SIZE] = resolution.selected_pocket.size
+        state["_pocket_key_residues"] = resolution.selected_pocket.residues
+
+
+def _resolve_pose_validation(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "selected_poses": state[SELECTED_POSES],
+        "receptor_pdb": state.get(RECEPTOR_PDB) or state.get(TARGET_STRUCTURE),
+        "pb_config": kwargs.get("pb_config", "dock"),
+        "top_n": kwargs.get("top_n"),
+        "full_report": kwargs.get("full_report", True),
+    }
+
+
+def _bind_pose_validation(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    report_csv = outputs.get("pose_validation_report")
+    if report_csv:
+        state[POSE_VALIDATION_REPORT] = report_csv
+    # 记录PB统计信息供报告使用
+    state["_pb_valid_count"] = outputs.get("pb_valid_count", 0)
+    state["_pb_invalid_count"] = outputs.get("pb_invalid_count", 0)
+
+
 def _resolve_gromacs_md(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     return {
         "receptor_pdb": state[RECEPTOR_PDB],
@@ -455,6 +529,7 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.POSE_EXTRACTION: _resolve_pose_extraction,
     ActionType.INTERACTION_ANALYSIS: _resolve_interaction_analysis,
     ActionType.FINAL_RANKING: _resolve_final_ranking,
+    ActionType.DIVERSITY_SELECTION: _resolve_diversity_selection,
     ActionType.STRUCTURE_ANALYSIS: _resolve_structure_analysis,
     ActionType.PROTEIN_REPAIR: _resolve_protein_repair,
     ActionType.PROTONATION: _resolve_protonation,
@@ -465,7 +540,10 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.FORMAT_CONVERSION: _resolve_format_conversion,
     ActionType.SHORT_MD: _resolve_gromacs_md,
     ActionType.MOLECULAR_DYNAMICS: _resolve_gromacs_md,
-    # ADMET_FILTERING: _resolve_admet_filtering,  # 待 ToolManager._dispatch 适配完成后启用
+    ActionType.ADMET_FILTERING: _resolve_admet_filtering,
+    ActionType.POSE_VALIDATION: _resolve_pose_validation,
+    ActionType.POCKET_PREDICTION: _resolve_pocket_prediction,
+    ActionType.DIFFDOCK_DOCKING: _resolve_diffdock,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -481,6 +559,7 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.POSE_EXTRACTION: _bind_pose_extraction,
     ActionType.INTERACTION_ANALYSIS: _bind_interaction_analysis,
     ActionType.FINAL_RANKING: _bind_final_ranking,
+    ActionType.DIVERSITY_SELECTION: _bind_diversity_selection,
     ActionType.STRUCTURE_ANALYSIS: _bind_structure_analysis,
     ActionType.PROTEIN_REPAIR: _bind_protein_repair,
     ActionType.PROTONATION: _bind_protonation,
@@ -491,7 +570,10 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.FORMAT_CONVERSION: _bind_format_conversion,
     ActionType.SHORT_MD: _bind_gromacs_md,
     ActionType.MOLECULAR_DYNAMICS: _bind_gromacs_md,
-    # ADMET_FILTERING: _bind_admet_filtering,  # 待 ToolManager._dispatch 适配完成后启用
+    ActionType.ADMET_FILTERING: _bind_admet_filtering,
+    ActionType.POSE_VALIDATION: _bind_pose_validation,
+    ActionType.POCKET_PREDICTION: _bind_pocket_prediction,
+    ActionType.DIFFDOCK_DOCKING: _bind_diffdock,
 }
 
 
@@ -510,6 +592,7 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.MOLECULAR_DOCKING: "molecular_docking",
     ActionType.POSE_EXTRACTION: "pose_extraction",
     ActionType.INTERACTION_ANALYSIS: "interaction_analysis",
+    ActionType.DIVERSITY_SELECTION: "final_ranking",
     ActionType.FINAL_RANKING: "final_ranking",
     ActionType.STRUCTURE_ANALYSIS: "target_structure_acquisition",
     ActionType.PROTEIN_REPAIR: "protein_preparation",
@@ -522,6 +605,9 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.SHORT_MD: "final_ranking",
     ActionType.MOLECULAR_DYNAMICS: "final_ranking",
     ActionType.ADMET_FILTERING: "final_ranking",
+    ActionType.POSE_VALIDATION: "pose_extraction",
+    ActionType.POCKET_PREDICTION: "pocket_definition",
+    ActionType.DIFFDOCK_DOCKING: "molecular_docking",
 }
 
 

@@ -61,6 +61,9 @@ e2e_*.sh
 e2e_*.json
 E2E_VALIDATION_REPORT.md
 
+# ── DiffDock SO(3) 缓存文件 ──
+*.npy
+
 # ── PPT 文件 ──
 虚拟筛选智能体系统.pptx
 AutoVS-Agent_汇报演示.pptx
