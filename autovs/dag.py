@@ -434,6 +434,20 @@ def _bind_admet_filtering(outputs: dict[str, Any], state: dict[str, Any]) -> Non
             state[SCORES_CSV] = str(merged)
 
 
+def _resolve_fpocket(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {"protein_path": state[TARGET_STRUCTURE], "top_n": kwargs.get("top_n", 5)}
+
+
+def _bind_fpocket(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    pocket_path = outputs.get("pocket")
+    if pocket_path:
+        from autovs.schemas import PocketResolution
+        resolution = PocketResolution.model_validate_json(Path(pocket_path).read_text(encoding="utf-8"))
+        state[POCKET_RESOLUTION] = resolution.model_dump(mode="json")
+        state[POCKET_CENTER] = resolution.selected_pocket.center
+        state[POCKET_SIZE] = resolution.selected_pocket.size
+
+
 def _resolve_diffdock(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     return {
         "receptor_pdb": state[RECEPTOR_PDB],
@@ -544,6 +558,7 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.POSE_VALIDATION: _resolve_pose_validation,
     ActionType.POCKET_PREDICTION: _resolve_pocket_prediction,
     ActionType.DIFFDOCK_DOCKING: _resolve_diffdock,
+    ActionType.GEOMETRIC_POCKET_DETECTION: _resolve_fpocket,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -574,6 +589,7 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.POSE_VALIDATION: _bind_pose_validation,
     ActionType.POCKET_PREDICTION: _bind_pocket_prediction,
     ActionType.DIFFDOCK_DOCKING: _bind_diffdock,
+    ActionType.GEOMETRIC_POCKET_DETECTION: _bind_fpocket,
 }
 
 
@@ -608,6 +624,7 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.POSE_VALIDATION: "pose_extraction",
     ActionType.POCKET_PREDICTION: "pocket_definition",
     ActionType.DIFFDOCK_DOCKING: "molecular_docking",
+    ActionType.GEOMETRIC_POCKET_DETECTION: "pocket_definition",
 }
 
 

@@ -18,6 +18,7 @@ import csv
 import json
 import os
 import subprocess
+import tomllib
 import time
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,34 @@ def select_docking_engine(
     return "smina"
 
 
+# ── 从配置动态读取 Slurm 资源 ─────────────────────────────────────────
+
+def _load_slurm_config() -> dict[str, dict[str, Any]]:
+    """从 config/tools.toml 读取 Slurm GPU/CPU 资源配置."""
+    config_path = Path(__file__).resolve().parent.parent / "config" / "tools.toml"
+    try:
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        return {
+            "gpu": dict(raw.get("slurm", {}).get("gpu", {})),
+            "cpu": dict(raw.get("slurm", {}).get("cpu", {})),
+        }
+    except Exception:
+        return {"gpu": {}, "cpu": {}}
+
+
+def _gpu_defaults() -> dict[str, Any]:
+    """返回GPU Slurm资源的默认值，优先从 tools.toml 读取."""
+    cfg = _load_slurm_config().get("gpu", {})
+    return {
+        "gres": cfg.get("gres", "gpu:a100_3g.40gb:1"),
+        "cpus": int(cfg.get("cpus", 10)),
+        "memory": str(cfg.get("memory", "64G")),
+        "time": str(cfg.get("time", "1-12:00:00")),
+        "partition": str(cfg.get("partition", "gpu_long")),
+    }
+
+
 # ── GNINA Slurm 提交 ──────────────────────────────────────────────────
 
 def _build_gnina_slurm_script(
@@ -218,11 +247,10 @@ def submit_gnina_docking(
     cmd = " ".join(cmd_parts)
 
     if submit_slurm:
-        gpu_cfg = gpu_config or {}
-        gpu_cfg.setdefault("gres", "gpu:a100_2g.20gb:1")
-        gpu_cfg.setdefault("cpus", 10)
-        gpu_cfg.setdefault("memory", "40G")
-        gpu_cfg.setdefault("time", "1-12:00:00")
+        gpu_cfg = dict(gpu_config) if gpu_config else {}
+        defaults = _gpu_defaults()
+        for key, val in defaults.items():
+            gpu_cfg.setdefault(key, val)
         script = _build_gnina_slurm_script(gnina, cmd, output_dir, gpu_cfg)
         result = subprocess.run(
             ["sbatch", str(script)], capture_output=True, text=True, timeout=30,
@@ -331,11 +359,10 @@ def submit_diffdock_docking(
     )
 
     if submit_slurm:
-        gpu_cfg = gpu_config or {}
-        gpu_cfg.setdefault("gres", "gpu:a100_2g.20gb:1")
-        gpu_cfg.setdefault("cpus", 10)
-        gpu_cfg.setdefault("memory", "40G")
-        gpu_cfg.setdefault("time", "1-12:00:00")
+        gpu_cfg = dict(gpu_config) if gpu_config else {}
+        defaults = _gpu_defaults()
+        for key, val in defaults.items():
+            gpu_cfg.setdefault(key, val)
         script = _build_diffdock_slurm_script(
             conda_env, diffdock_home, python_cmd, output_dir, gpu_cfg,
         )

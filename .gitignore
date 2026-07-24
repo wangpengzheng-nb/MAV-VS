@@ -64,6 +64,14 @@ E2E_VALIDATION_REPORT.md
 # ── DiffDock SO(3) 缓存文件 ──
 *.npy
 
+# ── Phase 2 Slurm 运行时输出 ──
+tests/phase2_validation/*slurm_*.sh
+tests/phase2_validation/*slurm_*.out
+tests/phase2_validation/*slurm_*.err
+tests/phase2_validation/*.csv
+tests/phase2_validation/*.json
+tests/phase2_validation/*.md
+
 # ── PPT 文件 ──
 虚拟筛选智能体系统.pptx
 AutoVS-Agent_汇报演示.pptx

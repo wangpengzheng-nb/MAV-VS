@@ -43,6 +43,7 @@ class ActionType(str, Enum):
     POSE_VALIDATION = "pose_validation"                          # PoseBusters
     POCKET_PREDICTION = "pocket_prediction"                      # P2Rank
     DIFFDOCK_DOCKING = "diffdock_docking"                        # DiffDock
+    GEOMETRIC_POCKET_DETECTION = "geometric_pocket_detection"      # fpocket
 
 
 class ArtifactRef(StrictModel):

@@ -82,6 +82,7 @@ ACTION_PHASE = {
     ActionType.POSE_VALIDATION: "pose_extraction",
     ActionType.POCKET_PREDICTION: "pocket_definition",
     ActionType.DIFFDOCK_DOCKING: "molecular_docking",
+    ActionType.GEOMETRIC_POCKET_DETECTION: "pocket_definition",
 }
 
 LLM_ONLY_PHASES = ("target_research", "strategy_generation", "strategy_voting", "strategy_evolution")

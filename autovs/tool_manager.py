@@ -345,6 +345,8 @@ class ToolManager:
             return self._run_pocket_prediction(inputs, work_dir)
         if action == ActionType.DIFFDOCK_DOCKING:
             return self._run_diffdock(inputs, work_dir)
+        if action == ActionType.GEOMETRIC_POCKET_DETECTION:
+            return self._run_fpocket(inputs, work_dir)
         if action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
             from autovs.gromacs import submit_gromacs_md
             receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
@@ -1293,6 +1295,158 @@ class ToolManager:
             "docked_poses": rank1_sdf if rank1_sdf.is_file() else None,
             "top_confidence": top_confidence,
             "pose_count": len(poses),
+        }
+
+
+    def _run_fpocket(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """fpocket: 几何口袋检测（Voronoi alpha sphere + 描述符）。"""
+        import numpy as np
+        import shutil
+
+        protein = ensure_within(inputs["protein_path"], self.allowed_roots, must_exist=True)
+        top_n = int(inputs.get("top_n", 5))
+
+        output_json = work_dir / "fpocket_pockets.json"
+        # 幂等
+        if output_json.is_file() and output_json.stat().st_size > 0:
+            return {"pocket_resolution": output_json}
+
+        fpocket_cfg = self._require_executor("fpocket")
+        fpocket_bin = Path(fpocket_cfg.path) if fpocket_cfg.path else None
+        if not fpocket_bin or not fpocket_bin.exists():
+            raise RuntimeError("fpocket 二进制不存在")
+
+        # 复制蛋白到工作目录（fpocket 输出在 PDB 同目录）
+        local_pdb = work_dir / protein.name
+        shutil.copy2(protein, local_pdb)
+
+        result = run_argv(
+            [str(fpocket_bin), "-f", str(local_pdb)],
+            cwd=work_dir, timeout=int(inputs.get("timeout_seconds", 600)),
+            log_path=work_dir / "fpocket.log",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"fpocket failed (exit={result.returncode}): {result.stderr[-500:]}")
+
+        # 查找输出目录
+        stem = local_pdb.stem
+        out_dir = work_dir / f"{stem}_out"
+        if not out_dir.is_dir():
+            raise RuntimeError(f"fpocket 输出目录未找到: {out_dir}")
+
+        # 解析 info.txt
+        info_txt = out_dir / f"{stem}_info.txt"
+        if not info_txt.is_file():
+            raise RuntimeError(f"fpocket info 文件未找到: {info_txt}")
+
+        pockets: list[dict] = []
+        current = None
+        for line in info_txt.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("Pocket"):
+                if current:
+                    pockets.append(current)
+                parts = line.split(":")
+                pid = int(parts[0].split()[-1]) if parts else len(pockets) + 1
+                current = {"rank": pid}
+            elif current is not None:
+                if ":" in line:
+                    key, _, val = line.partition(":")
+                    key, val = key.strip(), val.strip()
+                    try:
+                        current[key] = float(val) if "." in val or val.replace("-", "").isdigit() else val
+                    except ValueError:
+                        current[key] = val
+        if current:
+            pockets.append(current)
+
+        # 解析口袋 PDB 提取中心坐标
+        for p in pockets:
+            rank = p["rank"]
+            pocket_pdb = out_dir / "pockets" / f"pocket{rank}_atm.pdb"
+            if not pocket_pdb.is_file():
+                continue
+            coords = []
+            for pline in pocket_pdb.read_text(encoding="utf-8", errors="replace").splitlines():
+                if pline.startswith("ATOM") or pline.startswith("HETATM"):
+                    try:
+                        coords.append([float(pline[30:38]), float(pline[38:46]), float(pline[46:54])])
+                    except (ValueError, IndexError):
+                        pass
+            if coords:
+                arr = np.array(coords)
+                p["center"] = [round(float(arr[:, 0].mean()), 4),
+                               round(float(arr[:, 1].mean()), 4),
+                               round(float(arr[:, 2].mean()), 4)]
+                p["atom_count"] = len(coords)
+
+        # 按 druggability score 排序
+        pockets.sort(key=lambda p: float(p.get("Druggability Score", p.get("Score", 0))), reverse=True)
+        for i, p in enumerate(pockets):
+            p["rank"] = i + 1
+
+        if not pockets:
+            raise RuntimeError("fpocket 未检测到任何口袋")
+
+        # 构建 PocketResolution
+        from autovs.schemas import (
+            PocketCandidate, PocketConfidence, PocketEvidence,
+            PocketQualityGate, PocketResolution, PocketSource,
+        )
+        import hashlib as _hashlib
+        top = pockets[0]
+        selected = PocketCandidate(
+            pocket_id=f"pocket_{_hashlib.sha256(str(top.get('center',[0,0,0])).encode()).hexdigest()[:12]}",
+            rank=1,
+            center=tuple(top.get("center", [0, 0, 0])),
+            size=(24.0, 24.0, 24.0),
+            source=PocketSource.VERIFIED_RESEARCH_STRUCTURE,
+            confidence=PocketConfidence.MEDIUM,
+            residues=[],
+            evidence=[
+                PocketEvidence(kind="fpocket_score",
+                               description=f"Druggability: {top.get('Druggability Score','?')}, Score: {top.get('Score','?')}",
+                               value=float(top.get("Druggability Score", top.get("Score", 0)))),
+                PocketEvidence(kind="fpocket_volume",
+                               description=f"Volume: {top.get('Volume','?')} A^3",
+                               value=float(top.get("Volume", 0))),
+            ],
+            quality_gates=[
+                PocketQualityGate(name="fpocket_detection", status="passed",
+                                  detail=f"Top druggability={top.get('Druggability Score','?')} among {len(pockets)}"),
+            ],
+            tool_versions={"fpocket": "4.0"},
+        )
+        alternates = []
+        for p in pockets[1:top_n]:
+            drugg = float(p.get("Druggability Score", p.get("Score", 0)))
+            alternates.append(PocketCandidate(
+                pocket_id=f"pocket_{_hashlib.sha256(str(p.get('center',[0,0,0])).encode()).hexdigest()[:12]}",
+                rank=p["rank"],
+                center=tuple(p.get("center", [0, 0, 0])),
+                size=(24.0, 24.0, 24.0),
+                source=PocketSource.VERIFIED_RESEARCH_STRUCTURE,
+                confidence=PocketConfidence.MEDIUM if drugg > 0.4 else PocketConfidence.LOW,
+                residues=[],
+                evidence=[
+                    PocketEvidence(kind="fpocket_score",
+                                   description=f"Druggability: {p.get('Druggability Score','?')}, Score: {p.get('Score','?')}",
+                                   value=drugg),
+                ],
+            ))
+        resolution = PocketResolution(
+            protein_path=str(local_pdb),
+            selected_pocket=selected,
+            alternate_pockets=alternates,
+            research_pdb_id=stem,
+            warnings=["fpocket geometric detection; verify with ML/experimental evidence"],
+        )
+        output_json.write_text(resolution.model_dump_json(indent=2), encoding="utf-8")
+        return {
+            "pocket_resolution": output_json,
+            "pocket": output_json,
+            "total_pockets": len(pockets),
+            "top_druggability": top.get("Druggability Score", top.get("Score")),
         }
 
 

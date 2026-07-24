@@ -177,6 +177,13 @@ path = "/users_home/wangpengzheng/software/p2rank_2.5.1/prank"
 health_check = "help"
 description = "P2Rank 机器学习结合口袋预测（apo口袋发现、候选排序、残基映射）"
 
+[executors.fpocket]
+name = "fpocket"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/software/fpocket/bin/fpocket"
+health_check = "--help"
+description = "fpocket 几何口袋检测（Voronoi/alpha sphere，口袋描述符+可药性评分）"
+
 # diffdock executor 已在前面 [executors.diffdock] 定义
 
 [environments]
@@ -195,12 +202,12 @@ gromacs = "containers/gromacs_md.sif"
 partition = "cpu_only"
 qos = "cpuonly"
 cpus = 10
-memory = "18G"
+memory = "64G"
 time = "3-00:00:00"
 
 [slurm.gpu]
 partition = "gpu_long"
-gres = "gpu:a100_2g.20gb:1"
+gres = "gpu:a100_3g.40gb:1"
 cpus = 10
 memory = "64G"
 time = "1-12:00:00"

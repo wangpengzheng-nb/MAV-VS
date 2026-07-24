@@ -36,7 +36,8 @@ CAPABILITY_DEFINITIONS = {
     ActionType.FORMAT_CONVERSION: ("Open Babel converter", "General molecular format conversion (SMI/SDF/PDB/MOL2)", "conda", ["SMI", "SDF", "PDB"], ["SDF", "PDB", "PDBQT"], False),
     ActionType.POSE_VALIDATION: ("PoseBusters", "Validate docking pose plausibility (chemical validity, intramolecular geometry, intermolecular clashes)", "python", ["SDF", "PDB"], ["CSV"], False),
     ActionType.POCKET_PREDICTION: ("P2Rank", "ML-based apo binding pocket prediction (scored/clustered SAS points)", "subprocess", ["PDB", "mmCIF"], ["CSV", "JSON"], False),
-    ActionType.DIFFDOCK_DOCKING: ("DiffDock", "Diffusion model molecular docking (generative pose prediction + confidence scoring)", "conda", ["PDB", "SDF", "SMILES"], ["SDF", "JSON"], True),}
+    ActionType.DIFFDOCK_DOCKING: ("DiffDock", "Diffusion model molecular docking (generative pose prediction + confidence scoring)", "conda", ["PDB", "SDF", "SMILES"], ["SDF", "JSON"], True),
+    ActionType.GEOMETRIC_POCKET_DETECTION: ("fpocket", "Geometry-based cavity detection via Voronoi alpha spheres (druggability scores+descriptors)", "subprocess", ["PDB", "mmCIF"], ["CSV", "PDB", "JSON"], False),}
 
 
 def _torch_gpu_available() -> bool:
@@ -233,6 +234,12 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                     availability, reason = "degraded", "Java not found (P2Rank requires Java 17+)"
                 else:
                     availability, reason = "available", "P2Rank 2.5.1 ready"
+        elif action == ActionType.GEOMETRIC_POCKET_DETECTION:
+            fpocket_cfg = settings.executor_config("fpocket")
+            if not fpocket_cfg or not fpocket_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "fpocket binary not found"
+            else:
+                availability, reason = "available", "fpocket 4.0 ready"
         elif action == ActionType.DIFFDOCK_DOCKING:
             conda = settings.executable("conda")
             env_python = conda.parent.parent / "envs" / "diffdock" / "bin" / "python" if conda else None
