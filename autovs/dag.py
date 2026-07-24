@@ -434,6 +434,42 @@ def _bind_admet_filtering(outputs: dict[str, Any], state: dict[str, Any]) -> Non
             state[SCORES_CSV] = str(merged)
 
 
+def _resolve_foldseek(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "query_pdb": state[TARGET_STRUCTURE],
+        "target_db_dir": kwargs.get("target_db_dir"),
+        "target_pdb_list": kwargs.get("target_pdb_list", []),
+        "sensitivity": kwargs.get("sensitivity", 7.5),
+        "max_seqs": kwargs.get("max_seqs", 1000),
+        "timeout_seconds": kwargs.get("timeout_seconds", 7200),
+    }
+
+
+def _bind_foldseek(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    state["_foldseek_results"] = outputs.get("foldseek_results")
+    state["_foldseek_hit_count"] = outputs.get("hit_count", 0)
+    top = outputs.get("top_hit")
+    if top:
+        state["_foldseek_top_hit"] = top
+
+
+def _resolve_pharmacophore(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    return {
+        "library_path": state[NORMALIZED_LIBRARY],
+        "query_ligand_sdf": kwargs.get("query_ligand_sdf"),
+        "pharmacophore_query_json": kwargs.get("pharmacophore_query_json"),
+        "max_hits": kwargs.get("max_hits", 1000),
+        "timeout_seconds": kwargs.get("timeout_seconds", 7200),
+    }
+
+
+def _bind_pharmacophore(outputs: dict[str, Any], state: dict[str, Any]) -> None:
+    hits = outputs.get("pharmacophore_hits")
+    if hits:
+        state["_pharmacophore_hits"] = hits
+    state["_pharmacophore_hit_count"] = outputs.get("hit_count", 0)
+
+
 def _resolve_fpocket(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     return {"protein_path": state[TARGET_STRUCTURE], "top_n": kwargs.get("top_n", 5)}
 
@@ -559,6 +595,8 @@ INPUT_RESOLVERS: dict[ActionType, InputResolver] = {
     ActionType.POCKET_PREDICTION: _resolve_pocket_prediction,
     ActionType.DIFFDOCK_DOCKING: _resolve_diffdock,
     ActionType.GEOMETRIC_POCKET_DETECTION: _resolve_fpocket,
+    ActionType.PHARMACOPHORE_SCREENING: _resolve_pharmacophore,
+    ActionType.STRUCTURAL_HOMOLOGY_SEARCH: _resolve_foldseek,
 }
 
 OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
@@ -590,6 +628,8 @@ OUTPUT_BINDERS: dict[ActionType, OutputBinder] = {
     ActionType.POCKET_PREDICTION: _bind_pocket_prediction,
     ActionType.DIFFDOCK_DOCKING: _bind_diffdock,
     ActionType.GEOMETRIC_POCKET_DETECTION: _bind_fpocket,
+    ActionType.PHARMACOPHORE_SCREENING: _bind_pharmacophore,
+    ActionType.STRUCTURAL_HOMOLOGY_SEARCH: _bind_foldseek,
 }
 
 
@@ -625,6 +665,8 @@ ACTION_PHASE_MAP: dict[ActionType, str] = {
     ActionType.POCKET_PREDICTION: "pocket_definition",
     ActionType.DIFFDOCK_DOCKING: "molecular_docking",
     ActionType.GEOMETRIC_POCKET_DETECTION: "pocket_definition",
+    ActionType.PHARMACOPHORE_SCREENING: "molecule_standardization",
+    ActionType.STRUCTURAL_HOMOLOGY_SEARCH: "target_research",
 }
 
 

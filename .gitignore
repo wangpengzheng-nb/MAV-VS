@@ -68,6 +68,15 @@ E2E_VALIDATION_REPORT.md
 tests/phase2_validation/*slurm_*.sh
 tests/phase2_validation/*slurm_*.out
 tests/phase2_validation/*slurm_*.err
+tests/phase2_validation/dd_*.sh
+tests/phase2_validation/dd_*.out
+tests/phase2_validation/dd_*.err
+tests/phase2_validation/diag_*.sh
+tests/phase2_validation/diag_*.out
+tests/phase2_validation/diag_*.err
+tests/phase2_validation/dd_output/
+tests/phase2_validation/diffdock_output/
+tests/phase2_validation/gnina_output/
 tests/phase2_validation/*.csv
 tests/phase2_validation/*.json
 tests/phase2_validation/*.md

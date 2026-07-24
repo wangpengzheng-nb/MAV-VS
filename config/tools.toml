@@ -184,6 +184,21 @@ path = "/users_home/wangpengzheng/software/fpocket/bin/fpocket"
 health_check = "--help"
 description = "fpocket 几何口袋检测（Voronoi/alpha sphere，口袋描述符+可药性评分）"
 
+[executors.pharmit]
+name = "pharmit"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/software/pharmit-pixi/build/pharmit"
+health_check = ""
+description = "Pharmit 药效团筛选（pharma提取+dbcreate建库+dbsearch搜索）"
+
+[executors.foldseek]
+name = "foldseek"
+executor = "subprocess"
+path = "/users_home/wangpengzheng/software/foldseek/bin/foldseek"
+health_check = "help"
+description = "Foldseek 蛋白质结构同源搜索（3Di结构token+GPU加速，A100兼容）"
+gpu_required = true
+
 # diffdock executor 已在前面 [executors.diffdock] 定义
 
 [environments]

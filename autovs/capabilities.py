@@ -37,7 +37,9 @@ CAPABILITY_DEFINITIONS = {
     ActionType.POSE_VALIDATION: ("PoseBusters", "Validate docking pose plausibility (chemical validity, intramolecular geometry, intermolecular clashes)", "python", ["SDF", "PDB"], ["CSV"], False),
     ActionType.POCKET_PREDICTION: ("P2Rank", "ML-based apo binding pocket prediction (scored/clustered SAS points)", "subprocess", ["PDB", "mmCIF"], ["CSV", "JSON"], False),
     ActionType.DIFFDOCK_DOCKING: ("DiffDock", "Diffusion model molecular docking (generative pose prediction + confidence scoring)", "conda", ["PDB", "SDF", "SMILES"], ["SDF", "JSON"], True),
-    ActionType.GEOMETRIC_POCKET_DETECTION: ("fpocket", "Geometry-based cavity detection via Voronoi alpha spheres (druggability scores+descriptors)", "subprocess", ["PDB", "mmCIF"], ["CSV", "PDB", "JSON"], False),}
+    ActionType.GEOMETRIC_POCKET_DETECTION: ("fpocket", "Geometry-based cavity detection via Voronoi alpha spheres (druggability scores+descriptors)", "subprocess", ["PDB", "mmCIF"], ["CSV", "PDB", "JSON"], False),
+    ActionType.PHARMACOPHORE_SCREENING: ("Pharmit", "Pharmacophore + molecular shape screening (pharma/dbcreate/dbsearch)", "subprocess", ["SDF", "SMI", "JSON"], ["SDF", "JSON"], False),
+    ActionType.STRUCTURAL_HOMOLOGY_SEARCH: ("Foldseek", "3Di structure homology search (GPU-accelerated, A100-compatible)", "subprocess", ["PDB", "mmCIF"], ["M8", "CSV", "JSON"], True),}
 
 
 def _torch_gpu_available() -> bool:
@@ -240,6 +242,20 @@ def list_capabilities(settings: Settings) -> list[ToolCapability]:
                 availability, reason = "unavailable", "fpocket binary not found"
             else:
                 availability, reason = "available", "fpocket 4.0 ready"
+        elif action == ActionType.PHARMACOPHORE_SCREENING:
+            pharmit_cfg = settings.executor_config("pharmit")
+            if not pharmit_cfg or not pharmit_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "pharmit binary not found"
+            else:
+                availability, reason = "available", "Pharmit CLI ready (pharma/dbcreate/dbsearch)"
+        elif action == ActionType.STRUCTURAL_HOMOLOGY_SEARCH:
+            foldseek_cfg = settings.executor_config("foldseek")
+            if not foldseek_cfg or not foldseek_cfg.exists(str(PROJECT_ROOT)):
+                availability, reason = "unavailable", "foldseek binary not found"
+            elif not _torch_gpu_available():
+                availability, reason = "degraded", "GPU不可用（Foldseek GPU加速需要CUDA/A100）"
+            else:
+                availability, reason = "available", "Foldseek GPU ready (A100 compatible)"
         elif action == ActionType.DIFFDOCK_DOCKING:
             conda = settings.executable("conda")
             env_python = conda.parent.parent / "envs" / "diffdock" / "bin" / "python" if conda else None

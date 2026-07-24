@@ -44,6 +44,8 @@ class ActionType(str, Enum):
     POCKET_PREDICTION = "pocket_prediction"                      # P2Rank
     DIFFDOCK_DOCKING = "diffdock_docking"                        # DiffDock
     GEOMETRIC_POCKET_DETECTION = "geometric_pocket_detection"      # fpocket
+    PHARMACOPHORE_SCREENING = "pharmacophore_screening"            # Pharmit
+    STRUCTURAL_HOMOLOGY_SEARCH = "structural_homology_search"      # Foldseek
 
 
 class ArtifactRef(StrictModel):

@@ -347,6 +347,10 @@ class ToolManager:
             return self._run_diffdock(inputs, work_dir)
         if action == ActionType.GEOMETRIC_POCKET_DETECTION:
             return self._run_fpocket(inputs, work_dir)
+        if action == ActionType.PHARMACOPHORE_SCREENING:
+            return self._run_pharmacophore(inputs, work_dir)
+        if action == ActionType.STRUCTURAL_HOMOLOGY_SEARCH:
+            return self._run_foldseek(inputs, work_dir)
         if action in {ActionType.SHORT_MD, ActionType.MOLECULAR_DYNAMICS}:
             from autovs.gromacs import submit_gromacs_md
             receptor = ensure_within(inputs["receptor_pdb"], [self.settings.task_root], must_exist=True)
@@ -1447,6 +1451,164 @@ class ToolManager:
             "pocket": output_json,
             "total_pockets": len(pockets),
             "top_druggability": top.get("Druggability Score", top.get("Score")),
+        }
+
+
+    def _run_pharmacophore(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Pharmit: 药效团筛选（pharma → dbcreate → dbsearch）。"""
+        import csv as _csv
+
+        library_path = ensure_within(
+            inputs.get("library_path") or inputs.get("normalized_library"),
+            self.allowed_roots, must_exist=True,
+        )
+        query_ligand_sdf = inputs.get("query_ligand_sdf")
+        query_json = inputs.get("pharmacophore_query_json")
+
+        if not query_ligand_sdf and not query_json:
+            raise ValueError("PHARMACOPHORE_SCREENING 需要 query_ligand_sdf 或 pharmacophore_query_json")
+
+        pharmit_cfg = self._require_executor("pharmit")
+        pharmit = Path(pharmit_cfg.path) if pharmit_cfg.path else None
+        if not pharmit or not pharmit.exists():
+            raise RuntimeError("pharmit 二进制不存在")
+
+        # 幂等
+        hits_sdf = work_dir / "pharmit_hits.sdf"
+        if hits_sdf.is_file() and hits_sdf.stat().st_size > 0:
+            return {"pharmacophore_hits": hits_sdf}
+
+        # 1. 生成药效团 query
+        if query_json:
+            query_file = work_dir / "query.json"
+            if isinstance(query_json, dict):
+                query_file.write_text(json.dumps(query_json), encoding="utf-8")
+            else:
+                import shutil
+                qp = ensure_within(str(query_json), [self.settings.task_root], must_exist=True)
+                shutil.copy2(qp, query_file)
+        elif query_ligand_sdf:
+            ql = ensure_within(str(query_ligand_sdf), [self.settings.task_root], must_exist=True)
+            query_file = work_dir / "pharma_output.json"
+            result = run_argv(
+                [str(pharmit), "pharma", "-in", str(ql), "-out", str(query_file)],
+                cwd=work_dir, timeout=300, log_path=work_dir / "pharma.log",
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"pharma 失败: {result.stderr[-500:]}")
+            # pharma 可能输出多个JSON对象，提取第一个
+            raw = query_file.read_text(encoding="utf-8").strip()
+            if raw.startswith("{"):
+                pass  # 单对象OK
+            elif "}{" in raw:
+                first = raw[:raw.index("}{") + 1]
+                query_file.write_text(first, encoding="utf-8")
+        else:
+            raise RuntimeError("无法获取药效团query")
+
+        # 2. 建库 (dbcreate)
+        db_dir = work_dir / "pharmit_db"
+        db_dir.mkdir(exist_ok=True)
+        result = run_argv(
+            [str(pharmit), "dbcreate", "-in", str(library_path), "-dbdir", str(db_dir)],
+            cwd=work_dir, timeout=int(inputs.get("timeout_seconds", 7200)),
+            log_path=work_dir / "dbcreate.log",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"dbcreate 失败: {result.stderr[-500:]}")
+
+        # 3. 搜索 (dbsearch)
+        result = run_argv(
+            [str(pharmit), "dbsearch", "-dbdir", str(db_dir),
+             "-in", str(query_file), "-out", str(hits_sdf),
+             "-max-hits", str(inputs.get("max_hits", 1000))],
+            cwd=work_dir, timeout=int(inputs.get("timeout_seconds", 7200)),
+            log_path=work_dir / "dbsearch.log",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"dbsearch 失败: {result.stderr[-500:]}")
+        # dbsearch返回0即使0命中，检查输出
+        hit_count = 0
+        if hits_sdf.is_file():
+            hit_count = hits_sdf.read_text(encoding="utf-8", errors="replace").count("$$$$")
+
+        return {
+            "pharmacophore_hits": hits_sdf if hits_sdf.is_file() and hit_count > 0 else None,
+            "pharmacophore_query": query_file,
+            "pharmit_db": db_dir,
+            "hit_count": hit_count,
+        }
+
+
+    def _run_foldseek(self, inputs: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+        """Foldseek: 蛋白质结构同源搜索（3Di+GPU加速）。
+
+        输入：query PDB + target DB（或PDB文件列表用于建库）
+        输出：结构命中 m8 table（query,target,fident,alnlen,evalue,bits）
+        """
+        import csv as _csv
+
+        query_pdb = ensure_within(inputs["query_pdb"], self.allowed_roots, must_exist=True)
+        target_db = inputs.get("target_db_dir")
+        target_pdbs = inputs.get("target_pdb_list", [])
+
+        foldseek_cfg = self._require_executor("foldseek")
+        foldseek = Path(foldseek_cfg.path) if foldseek_cfg.path else None
+        if not foldseek or not foldseek.exists():
+            raise RuntimeError("foldseek 二进制不存在")
+
+        # 幂等检查
+        output_m8 = work_dir / "foldseek_results.m8"
+        if output_m8.is_file() and output_m8.stat().st_size > 0:
+            hits = list(_csv.reader(output_m8.open(), delimiter="\t"))
+            return {"foldseek_results": output_m8, "hit_count": len(hits)}
+
+        # 确定目标数据库
+        if not target_db:
+            if isinstance(target_pdbs, list) and target_pdbs:
+                db_dir = work_dir / "target_db"
+                db_dir.mkdir(exist_ok=True)
+                db_input = work_dir / "targets.txt"
+                db_input.write_text("\n".join(str(p) for p in target_pdbs), encoding="utf-8")
+                result = run_argv(
+                    [str(foldseek), "createdb", str(db_input), str(db_dir / "target")],
+                    cwd=work_dir, timeout=3600, log_path=work_dir / "createdb.log",
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Foldseek createdb failed: {result.stderr[-500:]}")
+                target_db = str(db_dir / "target")
+            else:
+                raise ValueError("Need target_db_dir or target_pdb_list for Foldseek search")
+
+        # 结构搜索
+        sensitivity = inputs.get("sensitivity", 7.5)
+        max_seqs = int(inputs.get("max_seqs", 1000))
+        tmp_dir = work_dir / "tmp"
+        tmp_dir.mkdir(exist_ok=True)
+        format_opts = "query,target,fident,alnlen,mismatch,qcov,tcov,evalue,bits"
+
+        result = run_argv(
+            [str(foldseek), "easy-search", str(query_pdb), target_db,
+             str(output_m8), str(tmp_dir),
+             "--format-output", format_opts,
+             "-s", str(sensitivity),
+             "--max-seqs", str(max_seqs)],
+            cwd=work_dir, timeout=int(inputs.get("timeout_seconds", 7200)),
+            log_path=work_dir / "foldseek.log",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Foldseek search failed: {result.stderr[-500:]}")
+
+        # 解析结果
+        hits = []
+        if output_m8.is_file():
+            with output_m8.open(newline="", encoding="utf-8") as f:
+                hits = list(_csv.reader(f, delimiter="\t"))
+
+        return {
+            "foldseek_results": output_m8,
+            "hit_count": len(hits),
+            "top_hit": hits[0] if hits else None,
         }
 
 

@@ -420,6 +420,20 @@ ACTION_CONTRACTS: dict[ActionType, ActionIOContract] = {
         optional_inputs=[],
         outputs=[POCKET_RESOLUTION],
     ),
+    ActionType.PHARMACOPHORE_SCREENING: ActionIOContract(
+        action_type=ActionType.PHARMACOPHORE_SCREENING,
+        scientific_role="Pharmit 药效团筛选（pharma提取+dbsearch搜索）",
+        required_inputs=[SCREENING_LIBRARY],
+        optional_inputs=["target_structure"],
+        outputs=["docked_poses", "scores_csv"],
+    ),
+    ActionType.STRUCTURAL_HOMOLOGY_SEARCH: ActionIOContract(
+        action_type=ActionType.STRUCTURAL_HOMOLOGY_SEARCH,
+        scientific_role="Foldseek 结构同源搜索（远程同源蛋白发现）",
+        required_inputs=["target_structure"],
+        optional_inputs=[],
+        outputs=["homology_report"],
+    ),
     ActionType.DIFFDOCK_DOCKING: ActionIOContract(
         action_type=ActionType.DIFFDOCK_DOCKING,
         scientific_role="DiffDock 扩散模型对接（PPI靶点推荐）",

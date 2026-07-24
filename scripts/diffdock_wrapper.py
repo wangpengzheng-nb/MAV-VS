@@ -35,6 +35,12 @@ from tqdm import tqdm
 DIFFDOCK_HOME = Path(os.environ.get("DIFFDOCK_HOME", "/users_home/wangpengzheng/software/DiffDock"))
 sys.path.insert(0, str(DIFFDOCK_HOME))
 
+# ⚠️ DiffDock 的 import 在模块级就会加载 .score.npy/.so3_*.npy
+# (通过 utils.torus → np.load('.score.npy'))。
+# 必须在 import 前切换到 DIFFDOCK_HOME 目录，否则 FileNotFoundError！
+_orig_cwd = os.getcwd()
+os.chdir(str(DIFFDOCK_HOME))
+
 from datasets.process_mols import write_mol_with_coords
 from utils.diffusion_utils import t_to_sigma as t_to_sigma_compl, get_t_schedule
 from utils.inference_utils import InferenceDataset
@@ -55,6 +61,7 @@ def run_diffdock(
     device: str = "cuda",
 ) -> dict:
     """Run DiffDock inference and return results summary."""
+    # CWD 已在模块顶层切换到 DIFFDOCK_HOME，SO(3) 缓存文件已可访问
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -77,9 +84,11 @@ def run_diffdock(
         confidence_model_dir = None
         confidence_args = None
 
-    # 推理设备
+    # 推理设备 — DiffDock get_model() 需要 torch.device 对象
     if device == "cuda" and not torch.cuda.is_available():
-        device = "cpu"
+        device = torch.device("cpu")
+    else:
+        device = torch.device(device)
 
     # 构建测试数据集
     complex_name = "diffdock_complex"
@@ -241,17 +250,24 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
     args = parser.parse_args()
 
+    # 将相对路径基于 ORIGINAL CWD 转为绝对路径
+    # （因为模块顶层已 os.chdir(DIFFDOCK_HOME) 以加载 SO(3) 缓存）
+    _out = Path(args.out_dir)
+    if not _out.is_absolute():
+        _out = (Path(_orig_cwd) / _out).resolve()
+    else:
+        _out = _out.resolve()
     result = run_diffdock(
-        protein_path=Path(args.protein),
+        protein_path=Path(args.protein).resolve(),
         ligand_desc=args.ligand,
-        out_dir=Path(args.out_dir),
+        out_dir=_out,
         samples_per_complex=args.samples,
         inference_steps=args.steps,
         device=args.device,
     )
 
-    result_path = Path(args.out_dir) / "result.json"
-    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    result_path = _out / "result.json"
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
     if result.get("status") == "ok":
         print(json.dumps({"status": "ok", "poses": len(result["poses"]), "top_confidence": result.get("top_confidence")}))

@@ -152,6 +152,7 @@ EXECUTABLE_STRATEGY_ACTIONS = {
     "physicochemical_filtering", "molecular_docking", "interaction_analysis",
     "final_ranking", "report_generation", "pose_validation", "admet_filtering",
     "pocket_prediction", "diffdock_docking", "geometric_pocket_detection",
+    "pharmacophore_screening", "structural_homology_search",
 }
 FUTURE_ACTION_CAPABILITIES = {
     "molecular_dynamics": "GROMACS/MD production workflow",
@@ -654,6 +655,8 @@ class StrategyGeneratorAgent:
             "pocket_prediction": "ML口袋预测（P2Rank apo结构）",
             "diffdock_docking": "扩散模型分子对接（DiffDock）",
             "geometric_pocket_detection": "几何口袋检测（fpocket）",
+            "pharmacophore_screening": "药效团筛选（Pharmit）",
+            "structural_homology_search": "结构同源搜索（Foldseek）",
             "physicochemical_filtering": "靶点适配理化过滤",
             "molecular_docking": "口袋导向分子对接",
             "interaction_analysis": "关键相互作用指纹分析",

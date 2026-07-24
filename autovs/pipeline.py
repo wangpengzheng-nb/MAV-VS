@@ -83,6 +83,8 @@ ACTION_PHASE = {
     ActionType.POCKET_PREDICTION: "pocket_definition",
     ActionType.DIFFDOCK_DOCKING: "molecular_docking",
     ActionType.GEOMETRIC_POCKET_DETECTION: "pocket_definition",
+    ActionType.PHARMACOPHORE_SCREENING: "molecule_standardization",
+    ActionType.STRUCTURAL_HOMOLOGY_SEARCH: "target_research",
 }
 
 LLM_ONLY_PHASES = ("target_research", "strategy_generation", "strategy_voting", "strategy_evolution")

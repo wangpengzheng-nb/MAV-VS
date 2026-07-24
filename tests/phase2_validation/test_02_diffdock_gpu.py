@@ -56,13 +56,22 @@ def run_diffdock_local(protein_path: Path, ligands: list[tuple[str, str]],
         env = _os.environ.copy()
         env["DIFFDOCK_HOME"] = DIFFDOCK_HOME
 
+        # DiffDock wrapper 内部已处理 os.chdir(DIFFDOCK_HOME)，无需指定 cwd
         result = subprocess.run(
             cmd, shell=True, capture_output=True, text=True,
-            timeout=7200, env=env, cwd=str(out_dir),
+            timeout=7200, env=env,
         )
 
         elapsed = time.time() - t0
         ok = result.returncode == 0
+
+        # 保存诊断日志(用于排查DiffDock运行问题)
+        (out_dir / "diffdock_run.log").write_text(
+            f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
+            encoding="utf-8",
+        )
+        if result.stderr:
+            print(f"    [stderr]: {result.stderr[:300]}", flush=True)
 
         result_json = out_dir / "result.json"
         poses_data = {}
@@ -120,7 +129,8 @@ def run_validation() -> int:
         ligands = TEST_LIGANDS
         if args.smiles:
             ligands = [(args.name, args.smiles)]
-        work_dir = Path("/tmp/autovs_diffdock_test")
+        # 使用共享文件系统而非 /tmp (计算节点和登录节点不共享 /tmp)
+        work_dir = REPORT_DIR / "diffdock_output"
         work_dir.mkdir(parents=True, exist_ok=True)
         result = run_diffdock_local(protein_path, ligands, work_dir)
         report_path = REPORT_DIR / "diffdock_result.json"

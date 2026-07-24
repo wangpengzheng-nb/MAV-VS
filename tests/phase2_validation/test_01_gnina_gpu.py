@@ -170,7 +170,7 @@ def run_validation() -> int:
         if inputs is None:
             print("❌ 未找到baseline输入文件")
             return 1
-        work_dir = Path("/tmp/autovs_gnina_test")
+        work_dir = REPORT_DIR / "gnina_output"
         work_dir.mkdir(parents=True, exist_ok=True)
         result = run_gnina_local(inputs, work_dir)
         report_path = REPORT_DIR / "gnina_result.json"
